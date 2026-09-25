@@ -2,8 +2,8 @@
 // function over them needs beyond arithmetic and order.
 import "gpu"
 
-/// Number is a type a kernel computes with: float32, int32 or uint32
-/// today, and the half floats once vsc has them. A function written once
+/// Number is a type a kernel computes with: float32, float16, bfloat16,
+/// int32 or uint32. A function written once
 /// over a Number -- gpu/parallel's reductions, scans and sorts -- is built
 /// for each type it is used at, on the device and on the host.
 public protocol Number: Numeric, Comparable {
@@ -29,6 +29,13 @@ public protocol Number: Numeric, Comparable {
     /// may have no float64.
     static func ToFloat64(_ x: Self) -> float64
     static func FromFloat64(_ x: float64) -> Self
+    /// Accumulator is what a long sum of this type is taken in -- a dot
+    /// product's, a matmul's: float32 for a half, which would lose the
+    /// sum's low bits after a few hundred terms, and the type itself
+    /// otherwise. Widen and Narrow go to it and back, Narrow rounding once.
+    associatedtype Accumulator: Number
+    static func Widen(_ x: Self) -> Accumulator
+    static func Narrow(_ x: Accumulator) -> Self
 }
 
 extension float32: Number {
@@ -48,6 +55,9 @@ extension float32: Number {
     @inlinable public static func IsInteger() -> bool { return false }
     @inlinable public static func ToFloat64(_ x: float32) -> float64 { return float64(x) }
     @inlinable public static func FromFloat64(_ x: float64) -> float32 { return float32(x) }
+    public typealias Accumulator = float32
+    @inlinable public static func Widen(_ x: float32) -> float32 { return x }
+    @inlinable public static func Narrow(_ x: float32) -> float32 { return x }
 }
 
 extension int32: Number {
@@ -62,6 +72,9 @@ extension int32: Number {
     @inlinable public static func IsInteger() -> bool { return true }
     @inlinable public static func ToFloat64(_ x: int32) -> float64 { return float64(x) }
     @inlinable public static func FromFloat64(_ x: float64) -> int32 { return int32(x) }
+    public typealias Accumulator = int32
+    @inlinable public static func Widen(_ x: int32) -> int32 { return x }
+    @inlinable public static func Narrow(_ x: int32) -> int32 { return x }
 }
 
 extension uint32: Number {
@@ -76,4 +89,55 @@ extension uint32: Number {
     @inlinable public static func IsInteger() -> bool { return true }
     @inlinable public static func ToFloat64(_ x: uint32) -> float64 { return float64(x) }
     @inlinable public static func FromFloat64(_ x: float64) -> uint32 { return uint32(x) }
+    public typealias Accumulator = uint32
+    @inlinable public static func Widen(_ x: uint32) -> uint32 { return x }
+    @inlinable public static func Narrow(_ x: uint32) -> uint32 { return x }
+}
+
+extension float16: Number {
+    @inlinable public static func Lowest() -> float16 { return -float16.infinity }
+    @inlinable public static func Highest() -> float16 { return float16.infinity }
+    @inlinable public static func Plus(_ a: float16, _ b: float16) -> float16 { return a + b }
+    /// A half's total order is float32's on its 16 bits.
+    @inlinable public static func OrderKey(_ x: float16) -> uint32 {
+        let b = uint32(x.bitPattern)
+        return (b & 0x8000) != 0 ? (~b & 0xFFFF) : (b | 0x8000)
+    }
+    @inlinable public static func FromOrderKey(_ k: uint32) -> float16 {
+        let b = (k & 0x8000) != 0 ? (k & 0x7FFF) : (~k & 0xFFFF)
+        return float16(bitPattern: uint16(truncatingIfNeeded: b))
+    }
+    @inlinable public static func AtomicAdd(_ p: UnsafeMutablePointer<float16>, _ v: float16) -> float16 {
+        return gpu.Atomic.Add(p, v)
+    }
+    @inlinable public static func IsInteger() -> bool { return false }
+    @inlinable public static func ToFloat64(_ x: float16) -> float64 { return float64(x) }
+    @inlinable public static func FromFloat64(_ x: float64) -> float16 { return float16(x) }
+    public typealias Accumulator = float32
+    @inlinable public static func Widen(_ x: float16) -> float32 { return float32(x) }
+    @inlinable public static func Narrow(_ x: float32) -> float16 { return float16(x) }
+}
+
+extension bfloat16: Number {
+    @inlinable public static func Lowest() -> bfloat16 { return -bfloat16.infinity }
+    @inlinable public static func Highest() -> bfloat16 { return bfloat16.infinity }
+    @inlinable public static func Plus(_ a: bfloat16, _ b: bfloat16) -> bfloat16 { return a + b }
+    /// A half's total order is float32's on its 16 bits.
+    @inlinable public static func OrderKey(_ x: bfloat16) -> uint32 {
+        let b = uint32(x.bitPattern)
+        return (b & 0x8000) != 0 ? (~b & 0xFFFF) : (b | 0x8000)
+    }
+    @inlinable public static func FromOrderKey(_ k: uint32) -> bfloat16 {
+        let b = (k & 0x8000) != 0 ? (k & 0x7FFF) : (~k & 0xFFFF)
+        return bfloat16(bitPattern: uint16(truncatingIfNeeded: b))
+    }
+    @inlinable public static func AtomicAdd(_ p: UnsafeMutablePointer<bfloat16>, _ v: bfloat16) -> bfloat16 {
+        return gpu.Atomic.Add(p, v)
+    }
+    @inlinable public static func IsInteger() -> bool { return false }
+    @inlinable public static func ToFloat64(_ x: bfloat16) -> float64 { return float64(x) }
+    @inlinable public static func FromFloat64(_ x: float64) -> bfloat16 { return bfloat16(x) }
+    public typealias Accumulator = float32
+    @inlinable public static func Widen(_ x: bfloat16) -> float32 { return float32(x) }
+    @inlinable public static func Narrow(_ x: float32) -> bfloat16 { return bfloat16(x) }
 }

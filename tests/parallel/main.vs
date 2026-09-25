@@ -1,6 +1,7 @@
 // gpu/parallel on every device, against the host and the CPU device.
 import "gpu"
 import "gpu/parallel"
+import "gpu/dtype"
 import "gpu/gputest"
 
 var rng = gputest.Random(seed: 1)
@@ -301,5 +302,55 @@ for n in gputest.Sizes {
         }
     }
 }
+
+// ---- float16 and bfloat16 ----
+
+// The half floats through the same generic functions. A half's sum rounds
+// at every step, so a sum or scan is checked against the CPU device's,
+// which adds in the same tree; min, max, select and sort are exact; and a
+// scatter-add adds small whole numbers, exact in any order.
+func halves<T: dtype.Number>(_ name: string, _ t: T.Type) async throws {
+    for n in gputest.Sizes {
+        let xs = floats(n).map { T.FromFloat64(float64($0) * 8 - 4) }
+        var lo = T.Highest(), hi = T.Lowest()
+        for v in xs { lo = min(lo, v); hi = max(hi, v) }
+        var positions: [uint32] = []
+        for i in 0..<n { positions.append(uint32(i)) }
+        var sum: [T] = [], scan: [T] = []
+        for d in gputest.Devices() {
+            let b = try await d.Upload(xs)
+            gputest.Equal("Reduce \(name) Min Max/\(n)", d, [try await parallel.Reduce(b, .Min), try await parallel.Reduce(b, .Max)], [lo, hi])
+            let s = [try await parallel.Reduce(b, .Sum)]
+            let c = try await d.Upload(xs)
+            try await parallel.Scan(c)
+            let got = try await c.Download()
+            if d.IsCPU { sum = s; scan = got } else {
+                gputest.Equal("Reduce \(name) Sum/\(n) vs cpu", d, s, sum)
+                gputest.Equal("Scan \(name)/\(n) vs cpu", d, got, scan)
+            }
+            let w = parallel.Where.Less(0.5)
+            gputest.Equal("Select \(name)/\(n)", d, try await parallel.Select(b, where: w).Download(), xs.filter { T.ToFloat64($0) < 0.5 })
+            let k = try await d.Upload(xs), v = try await d.Upload(positions)
+            try await parallel.Sort(k, values: v)
+            gputest._record("Sort \(name)/\(n)", d, sortProblem(xs.map { uint64(T.OrderKey($0)) }, (try await k.Download()).map { uint64(T.OrderKey($0)) }, try await v.Download()))
+        }
+        if n > 1000 { continue }
+        var small: [T] = [], buckets: [uint32] = []
+        var want = [T](repeating: T.FromFloat64(0), count: 17)
+        for _ in 0..<n {
+            let v = T.FromFloat64(float64(rng.Uint32() % 4)), at = rng.Uint32() % 17
+            small.append(v); buckets.append(at)
+            want[Int(at)] = want[Int(at)] + v
+        }
+        for d in gputest.Devices() {
+            let sums = try await d.Upload([T](repeating: T.FromFloat64(0), count: 17))
+            try await parallel.ScatterAdd(try await d.Upload(small), try await d.Upload(buckets), into: sums)
+            gputest.Equal("ScatterAdd \(name)/\(n)", d, try await sums.Download(), want)
+        }
+    }
+}
+
+try await halves("f16", float16.self)
+try await halves("bf16", bfloat16.self)
 
 gputest.Done()

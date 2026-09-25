@@ -5,7 +5,9 @@
 // block of C, walking K sixteen at a time, and each work-item one element
 // of it. Every element's sum is taken in the order of k, so a result is
 // the same on every device that rounds each multiply and add, and differs
-// only where a device fuses them.
+// only where a device fuses them. The sum is taken in the type's
+// dtype.Number.Accumulator -- float32 for a half, as every half GEMM
+// does -- and the epilogue too, so C is rounded once, at the end.
 import "gpu"
 import "gpu/dtype"
 import "gpu/parallel"
@@ -50,7 +52,7 @@ public enum Activation {
     let batch = gpu.GroupIndex.z
     let baseA = batch * strideA
     let baseB = batch * strideB
-    var sum: T = 0
+    var sum: T.Accumulator = 0
     var t = 0
     while t < k {
         // A's rows x t..t+16, and B's t..t+16 x columns, zero past the edges.
@@ -61,7 +63,7 @@ public enum Activation {
         gpu.Barrier()
         var i = 0
         while i < 16 {
-            sum = sum + ta16[ly * 16 + i] * tb16[i * 16 + lx]
+            sum = sum + T.Widen(ta16[ly * 16 + i]) * T.Widen(tb16[i * 16 + lx])
             i += 1
         }
         gpu.Barrier()
@@ -69,17 +71,17 @@ public enum Activation {
     }
     if row < m && col < n {
         let at = batch * strideC + row * n + col
-        var v = sum * scale
+        var v = sum * T.Widen(scale)
         if hasBias {
-            v = v + bias[col]
+            v = v + T.Widen(bias[col])
         }
         if hasResidual {
-            v = v + residual[at]
+            v = v + T.Widen(residual[at])
         }
         if activation == 1 && v < 0 {
             v = 0
         }
-        c[at] = v
+        c[at] = T.Narrow(v)
     }
 }
 
@@ -141,15 +143,15 @@ public struct Epilogue<T: dtype.Number> {
     // A row a workgroup: each work-item sums a strided part of it, and the
     // group adds the parts in a fixed order.
     let row = gpu.GroupIndex.x
-    var part: T = 0
+    var part: T.Accumulator = 0
     var j = parallel.GroupRank()
     while j < k {
-        part = part + a[row * k + j] * x[j]
+        part = part + T.Widen(a[row * k + j]) * T.Widen(x[j])
         j += parallel.GroupCount()
     }
     let total = parallel.GroupSum(part)
     if parallel.GroupRank() == 0 && row < m {
-        y[row] = total
+        y[row] = T.Narrow(total)
     }
 }
 

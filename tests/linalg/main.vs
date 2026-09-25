@@ -2,6 +2,7 @@
 // against an f64 host product within ULPs, and against the CPU device.
 import "gpu"
 import "gpu/linalg"
+import "gpu/dtype"
 import "gpu/gputest"
 
 var rng = gputest.Random(seed: 3)
@@ -103,5 +104,48 @@ for (m, k) in [(1, 1), (7, 3), (64, 256), (300, 1000), (5, 4097)] {
         gputest.Equal("Transpose \(m)x\(k)", d, try await t.Download(), wantT)
     }
 }
+
+// ---- float16 and bfloat16 ----
+
+// Halves in, halves out, the sum taken in float32: within the float32
+// bound of a sum of k products, plus one rounding to the half at the end
+// (eps, relative) and its smallest subnormal step (tiny).
+func halfMatmul<T: dtype.Number>(_ name: string, _ t: T.Type, eps: float64, tiny: float64) async throws {
+    for (m, n, k) in shapes {
+        for (ta, tb) in [(false, false), (true, false), (false, true)] {
+            var ah: [T] = [], bh: [T] = []
+            for _ in 0..<(m * k) { ah.append(T.FromFloat64(float64(rng.Float32()) * 2 - 1)) }
+            for _ in 0..<(k * n) { bh.append(T.FromFloat64(float64(rng.Float32()) * 2 - 1)) }
+            let pa = ah.map { T.ToFloat64($0) }, pb = bh.map { T.ToFloat64($0) }
+            let want = hostMatmul(pa, pb, m, n, k, ta, tb)
+            let sums = hostProducts(pa, pb, m, n, k, ta, tb, true)
+            var bound: [float64] = []
+            for i in 0..<want.count {
+                bound.append(sums[i] * float64(k + 2) * 5.960464477539063e-08 + want[i].magnitude * eps + tiny)
+            }
+            let what = "\(name) \(m)x\(n)x\(k) t\(ta ? 1 : 0)\(tb ? 1 : 0)"
+            for d in gputest.Devices() {
+                let c = try await d.CreateBuffer(of: T.self, count: m * n)
+                try await linalg.Matmul(try await d.Upload(ah), try await d.Upload(bh), into: c,
+                                        linalg.Shape(m: m, n: n, k: k, transposeA: ta, transposeB: tb))
+                gputest.Near("Matmul \(what)", d, (try await c.Download()).map { float32(T.ToFloat64($0)) }, want, bound: bound)
+            }
+        }
+    }
+    // A sum a half cannot hold on the way: 4096 ones, which a half sum
+    // stops growing at 2048 (float16) or 256 (bfloat16).
+    let ones = [T](repeating: T.FromFloat64(1), count: 4096)
+    for d in gputest.Devices() {
+        let y = try await d.CreateBuffer(of: T.self, count: 1)
+        try await linalg.Gemv(try await d.Upload(ones), try await d.Upload(ones), into: y, m: 1, k: 4096)
+        let c = try await d.CreateBuffer(of: T.self, count: 1)
+        try await linalg.Matmul(try await d.Upload(ones), try await d.Upload(ones), into: c, linalg.Shape(m: 1, n: 1, k: 4096))
+        gputest.Equal("Gemv \(name) accumulates in float32", d, try await y.Download(), [T.FromFloat64(4096)])
+        gputest.Equal("Matmul \(name) accumulates in float32", d, try await c.Download(), [T.FromFloat64(4096)])
+    }
+}
+
+try await halfMatmul("f16", float16.self, eps: 4.8828125e-04, tiny: 5.960464477539063e-08)
+try await halfMatmul("bf16", bfloat16.self, eps: 3.90625e-03, tiny: 1e-38)
 
 gputest.Done()
