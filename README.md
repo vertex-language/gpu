@@ -1,20 +1,13 @@
 # gpu
 
-[![package: core](https://img.shields.io/badge/package-core-f4f4f5?style=flat-square&labelColor=e4e4e7&color=18181b)](https://github.com/vertex-language)
+[![package: vs-package](https://img.shields.io/badge/package-vs--package-f4f4f5?style=flat-square&labelColor=e4e4e7&color=18181b)](https://github.com/vertex-language)
 [![devices: metal | cuda | hip | cpu](https://img.shields.io/badge/devices-metal%20%7C%20cuda%20%7C%20hip%20%7C%20cpu-f4f4f5?style=flat-square&labelColor=e4e4e7&color=18181b)](https://github.com/vertex-language/gpu)
 [![kernels: .vs](https://img.shields.io/badge/kernels-.vs-f4f4f5?style=flat-square&labelColor=e4e4e7&color=18181b)](https://github.com/vertex-language/gpu)
 [![status: early](https://img.shields.io/badge/status-early-f4f4f5?style=flat-square&labelColor=e4e4e7&color=18181b)](https://github.com/vertex-language/gpu)
 
-The shared library of accelerated functions for Vertex. These are the
-sorts, scans, matrix multiplies, FFTs, random streams, BVHs and attention
-kernels that AI, 3D, media, simulation and data packages all need, written
-once as `.vs` kernels. Everyone else calls them instead of shipping their own.
+Accelerated compute library: sorts, scans, matrix multiplies, FFTs, random streams, BVHs, and attention kernels written as `.vs` kernels.
 
-> **Status: early.** Seven packages are built and tested on Metal and the
-> CPU device; the rest of this document is the blueprint they grow into.
-> The `proposed_ai_packages.md` and `proposed_3d_packages.md` design docs
-> were a sketch. Where this document differs from them, this one wins
-> (see [From the sketch](#from-the-sketch)).
+> **Status: early.** Seven packages are built and tested on Metal and the CPU device; the rest of this document is the blueprint they grow into.
 
 | Package | Built | Tested |
 | --- | --- | --- |
@@ -26,7 +19,17 @@ once as `.vs` kernels. Everyone else calls them instead of shipping their own.
 | `gpu/random` | Philox4x32-10: `Key`, `Split`, `Fold`, `Block`, `Bits`, `Uint32`, `Uniform`, `Normal` (Box–Muller), `Below`, `Bernoulli`; `Fill` for `float32` and `uint32` buffers, `FillNormal` | Random123's known answers; every device bit-identical to the host; `Normal`'s moments |
 | `gpu/gputest` | `Devices`, `Equal`, `Close` (ULPs), `Near` (an absolute bound per element), `Random`, `Sizes`, `Done` | the harness the others are tested with |
 
-Run the tests with `vsc run test-parallel`, `test-linalg`, `test-neural`, `test-attention` and `test-random` (with `-update` the first time, to fetch `math`).
+```bash
+# Run any entry point
+vsc run main.vs
+
+# Run the test suites
+vsc run test-parallel
+vsc run test-linalg
+vsc run test-neural
+vsc run test-attention
+vsc run test-random
+```
 
 ---
 
@@ -441,7 +444,7 @@ gpu/
 | vsc `Float16` / `BFloat16` | half-precision anything | built: `float16` and `bfloat16` are vsc builtins over VIR `f16`/`bf16`, computed in `float32` and rounded once until a backend selects half instructions; `gpu.Atomic.Add` of either |
 | fp8/fp6/fp4 storage types in VIR | `dtype.Scaled` on the device | reserved |
 | Wave-matrix instructions in VIR | `linalg.Tile` at tensor-core speed | reserved; plain FMAs until then |
-| `math` in kernels (K9) | `neural`, `random.Normal`, GELU/SiLU epilogues | built: float32 elementary functions in pure Vertex, the `math` repository |
+| `math` in kernels (K9) | `neural`, `random.Normal`, GELU/SiLU epilogues | built: float32 elementary functions from the `math` repository |
 | Queues and events | overlapping operations; interactive `raster` | launches on Metal are encoded into one command buffer and run when the host next reads or writes a buffer; explicit queues and events are next |
 | `i64` atomic min | the visibility buffer | in VIR and all three GPU backends |
 
