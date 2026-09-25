@@ -21,13 +21,21 @@ public protocol Block {
     /// Decode is element j of the block whose first byte is at.
     static func Decode(_ b: gpu.Span<uint8>, _ at: int, _ j: int) -> float32
     /// Dot is the block at `at` dotted with Size() floats of x from xi, the
-    /// scale applied once: the inner step of a quantized Gemv.
+    /// scale applied once: the inner step of a quantized Gemv. It reads
+    /// unchecked, so the caller has checked that the block and the floats
+    /// are in b and x.
     static func Dot(_ b: gpu.Span<uint8>, _ at: int, _ x: gpu.Span<float32>, _ xi: int) -> float32
 }
 
 /// _scale is the float16 scale at a block's first two bytes.
 @inlinable public func _scale(_ b: gpu.Span<uint8>, _ at: int) -> float32 {
     return float32(float16(bitPattern: uint16(b[at]) | uint16(b[at + 1]) << 8))
+}
+
+/// _scaleUnchecked is _scale, the bytes read without a bounds check.
+@inlinable public func _scaleUnchecked(_ b: gpu.Span<uint8>, _ at: int) -> float32 {
+    let p = b._base + at
+    return float32(float16(bitPattern: uint16(p[0]) | uint16(p[1]) << 8))
 }
 
 /// Q4_0 is ggml's q4_0: a float16 scale d, then 16 bytes of 4-bit
@@ -43,14 +51,20 @@ public struct Q4_0: Block {
         return float32(int32(n) - 8) * _scale(b, at)
     }
     @inlinable public static func Dot(_ b: gpu.Span<uint8>, _ at: int, _ x: gpu.Span<float32>, _ xi: int) -> float32 {
+        // Blocks are 18 bytes, so their quants start 2-byte aligned: two
+        // bytes a load, four elements from each.
+        let q = UnsafePointer<uint16>(UnsafeRawPointer(b._base + (at &+ 2)))
+        let v = x._base + xi
         var s: float32 = 0
         var j = 0
-        while j < 16 {
-            let q = b[at + 2 + j]
-            s = s + float32(int32(q & 0x0F) - 8) * x[xi + j] + float32(int32(q >> 4) - 8) * x[xi + j + 16]
-            j += 1
+        while j < 8 {
+            let two = q[j]
+            let e = j &* 2
+            s = s + float32(int32(two & 0x0F) &- 8) * v[e] + float32(int32((two >> 4) & 0x0F) &- 8) * v[e &+ 16]
+                  + float32(int32((two >> 8) & 0x0F) &- 8) * v[e &+ 1] + float32(int32(two >> 12) &- 8) * v[e &+ 17]
+            j = j &+ 1
         }
-        return s * _scale(b, at)
+        return s * _scaleUnchecked(b, at)
     }
 }
 
@@ -64,13 +78,15 @@ public struct Q8_0: Block {
         return float32(int8(bitPattern: b[at + 2 + j])) * _scale(b, at)
     }
     @inlinable public static func Dot(_ b: gpu.Span<uint8>, _ at: int, _ x: gpu.Span<float32>, _ xi: int) -> float32 {
+        let q = b._base + (at &+ 2)
+        let v = x._base + xi
         var s: float32 = 0
         var j = 0
         while j < 32 {
-            s = s + float32(int8(bitPattern: b[at + 2 + j])) * x[xi + j]
-            j += 1
+            s = s + float32(int8(bitPattern: q[j])) * v[j]
+            j = j &+ 1
         }
-        return s * _scale(b, at)
+        return s * _scaleUnchecked(b, at)
     }
 }
 

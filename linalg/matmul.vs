@@ -139,7 +139,7 @@ public struct Epilogue<T: dtype.Number> {
                                    over: ((s.n + 15) / 16 * 16, (s.m + 15) / 16 * 16, s.batch), workgroup: (16, 16, 1))
 }
 
-@inlinable public func _gemvKernel<T: dtype.Number>(_ a: gpu.Span<T>, _ x: gpu.Span<T>, _ y: gpu.MutableSpan<T>, _ m: int, _ k: int) kernel {
+@inlinable public func _gemvKernel<T: dtype.Number>(_ a: gpu.Span<T>, _ x: gpu.Span<T>, _ y: gpu.MutableSpan<T>, _ m: int, _ k: int, _ accumulate: bool) kernel {
     // A row a workgroup: each work-item sums a strided part of it, and the
     // group adds the parts in a fixed order.
     let row = gpu.GroupIndex.x
@@ -151,47 +151,73 @@ public struct Epilogue<T: dtype.Number> {
     }
     let total = parallel.GroupSum(part)
     if parallel.GroupRank() == 0 && row < m {
-        y[row] = T.Narrow(total)
+        y[row] = T.Narrow(accumulate ? total + T.Widen(y[row]) : total)
     }
 }
 
 /// Gemv is y = A · x: A is m x k, row-major; x has k elements and y m.
+/// With accumulate, y = A · x + y: a residual added in the same pass.
 /// The matrix-vector product decoding a model is made of.
-@inlinable public func Gemv<T: dtype.Number>(_ a: gpu.Buffer<T>, _ x: gpu.Buffer<T>, into y: gpu.Buffer<T>, m: int, k: int) async throws {
+@inlinable public func Gemv<T: dtype.Number>(_ a: gpu.Buffer<T>, _ x: gpu.Buffer<T>, into y: gpu.Buffer<T>, m: int, k: int, accumulate: bool = false) async throws {
     if m == 0 {
         return
     }
-    try await _gemvKernel.Launch(a, x, y, m, k, over: m * 128, workgroup: 128)
+    try await _gemvKernel.Launch(a, x, y, m, k, accumulate, over: m * 128, workgroup: 128)
 }
 
-@inlinable public func _gemvBlockKernel<B: dtype.Block>(_ f: B, _ w: gpu.Span<uint8>, _ x: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>, _ m: int, _ k: int) kernel {
-    // A row a workgroup, as Gemv: each work-item dots a strided part of
-    // the row's blocks, decoding them in place, and the group adds the
-    // parts in a fixed order.
-    let row = gpu.GroupIndex.x
+@inlinable public func _gemvBlockKernel<B: dtype.Block>(_ f: B, _ w: gpu.Span<uint8>, _ x: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>, _ m: int, _ k: int, _ per: int, _ accumulate: bool) kernel {
+    // A row takes `per` lanes of a wave (a power of 2), so a short row does
+    // not leave most of a wave idle: its lanes dot strided blocks of the
+    // row, decoding them in place, and add the parts with butterfly
+    // shuffles inside their segment -- no barrier, no shared storage. On
+    // the CPU device a wave is one work-item, which takes its whole row.
+    let lanes = gpu.Wave.Size
+    let sub = gpu.Wave.Lane % per
+    let row = (gpu.GroupIndex.x * (128 / lanes) + gpu.LocalIndex.x / lanes) * (lanes / per) + gpu.Wave.Lane / per
     let blocks = k / B.Size()
-    let base = row * blocks * B.Bytes()
+    let bytes = B.Bytes(), size = B.Size()
+    let base = row &* blocks &* bytes
     var part: float32 = 0
-    var j = parallel.GroupRank()
-    while j < blocks {
-        part = part + B.Dot(w, base + j * B.Bytes(), x, j * B.Size())
-        j += parallel.GroupCount()
+    if row < m {
+        var j = sub
+        // Gemv checked that w holds m rows of blocks and x has k floats, so
+        // each block and its floats are in range: B.Dot reads them unchecked.
+        while j < blocks {
+            part = part + B.Dot(w, base &+ j &* bytes, x, j &* size)
+            j = j &+ per
+        }
     }
-    let total = parallel.GroupSum(part)
-    if parallel.GroupRank() == 0 && row < m {
-        y[row] = total
+    // Every lane takes part in the shuffles, a row past m's too.
+    var offset = per / 2
+    while offset > 0 {
+        part = part + gpu.Wave.ShuffleXor(part, mask: offset)
+        offset = offset / 2
+    }
+    if sub == 0 && row < m {
+        y[row] = accumulate ? part + y[row] : part
     }
 }
 
 /// Gemv is y = W · x with W block-quantized: m rows of k elements, each
 /// row k / format.Size() blocks of the format, one after another -- a GGUF
 /// tensor's bytes as they are. x and y are float32; the sum is taken in
-/// float32. What decoding a quantized model is made of.
-@inlinable public func Gemv<B: dtype.Block>(_ w: gpu.Buffer<uint8>, _ format: B, _ x: gpu.Buffer<float32>, into y: gpu.Buffer<float32>, m: int, k: int) async throws {
+/// float32. With accumulate, y = W · x + y. What decoding a quantized
+/// model is made of.
+@inlinable public func Gemv<B: dtype.Block>(_ w: gpu.Buffer<uint8>, _ format: B, _ x: gpu.Buffer<float32>, into y: gpu.Buffer<float32>, m: int, k: int, accumulate: bool = false) async throws {
     if m == 0 {
         return
     }
-    try await _gemvBlockKernel.Launch(format, w, x, y, m, k, over: m * 128, workgroup: 128)
+    if k % B.Size() != 0 || w.count < m * (k / B.Size()) * B.Bytes() || x.count < k || y.count < m {
+        fatalError("linalg.Gemv: \(m) rows of \(k) in \(w.count) bytes, x of \(x.count), y of \(y.count)")
+    }
+    // Lanes a row: about two blocks each, a power of 2, at most a wave.
+    let wave = y.Device.WaveSize
+    var per = 1
+    while per < wave && per * 2 <= k / B.Size() {
+        per *= 2
+    }
+    let rows = 128 / wave * (wave / per)
+    try await _gemvBlockKernel.Launch(format, w, x, y, m, k, per, accumulate, over: (m + rows - 1) / rows * 128, workgroup: 128)
 }
 
 @inlinable public func _transposeKernel<T: dtype.Number>(_ x: gpu.Span<T>, _ y: gpu.MutableSpan<T>, _ rows: int, _ cols: int) kernel {

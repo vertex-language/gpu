@@ -203,6 +203,12 @@ func quantized<B: dtype.Block>(_ name: string, _ format: B, _ q8: bool) async th
             let y = try await d.CreateBuffer(of: float32.self, count: m)
             try await linalg.Gemv(wb, format, try await d.Upload(x), into: y, m: m, k: k)
             gputest.Near("Gemv \(name) \(m)x\(k)", d, try await y.Download(), want, bound: bound)
+            // Accumulating into what y holds: a residual added in the pass.
+            let base = (0..<m).map { float32($0) * 0.5 }
+            let acc = try await d.Upload(base)
+            try await linalg.Gemv(wb, format, try await d.Upload(x), into: acc, m: m, k: k, accumulate: true)
+            gputest.Near("Gemv \(name) \(m)x\(k) accumulating", d, try await acc.Download(),
+                         (0..<m).map { want[$0] + float64(base[$0]) }, bound: bound.map { $0 + 1e-6 * float64(m) })
         }
     }
 }

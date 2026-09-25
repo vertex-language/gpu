@@ -177,6 +177,17 @@ do {
         gputest.Near("RoPE", d, g, want, bound: want.map { _ in 2e-4 })
         if !d.IsCPU { gputest.Close("RoPE vs cpu", d, g, got[0].1, ulps: 1) }
     }
+    // One token at a time, its position a value: the same bits as the
+    // buffer of positions gives.
+    for (d, g) in got {
+        var each: [float32] = []
+        for t in 0..<tokens {
+            let xb = try await d.Upload(Array(x[(t * heads * dim)..<((t + 1) * heads * dim)]))
+            try await neural.RoPE(xb, position: int(positions[t]), heads: heads, dim: dim)
+            each += try await xb.Download()
+        }
+        gputest.Equal("RoPE a token at a position", d, each, g)
+    }
 }
 
 gputest.Done()

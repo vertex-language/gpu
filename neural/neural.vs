@@ -241,6 +241,32 @@ func _rope(_ x: gpu.MutableSpan<float32>, _ positions: gpu.Span<int32>, _ heads:
     x[at + 1] = a * s + b * c
 }
 
+func _ropeAt(_ x: gpu.MutableSpan<float32>, _ position: int, _ heads: int, _ dim: int, _ base: float32) kernel {
+    // _rope for one token, its position a scalar: what decoding a token
+    // needs, with no buffer for the host to write.
+    let i = gpu.Index.x
+    let pairs = dim / 2
+    if i >= heads * pairs { return }
+    let p = i % pairs
+    let at = (i / pairs) * dim + 2 * p
+    let freq = math.Exp2(-float32(2 * p) / float32(dim) * math.Log2(base))
+    let angle = float32(position) * freq
+    let c = math.Cos(angle)
+    let s = math.Sin(angle)
+    let a = x[at]
+    let b = x[at + 1]
+    x[at] = a * c - b * s
+    x[at + 1] = a * s + b * c
+}
+
+/// RoPE rotates one token's heads in place (heads x dim), all at position:
+/// RoPE(x, positions:) for a single token, the position passed as a value.
+public func RoPE(_ x: gpu.Buffer<float32>, position: int, heads: int, dim: int, base: float32 = 10000) async throws {
+    let total = heads * (dim / 2)
+    if total == 0 { return }
+    try await _ropeAt.Launch(x, position, heads, dim, base, over: total)
+}
+
 /// RoPE rotates x in place (tokens x heads x dim, row-major, one position
 /// per token) by rotary position embeddings: each pair (x[2p], x[2p+1]) of
 /// a head turned by position · base^(-2p/dim). The interleaved (GPT-J)
