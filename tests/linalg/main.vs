@@ -213,6 +213,95 @@ func quantized<B: dtype.Block>(_ name: string, _ format: B, _ q8: bool) async th
     }
 }
 
+// ---- stacked weights: [W0; W1; W2] · x in one launch ----
+
+// The same product with the weights stacked in three buffers and copied
+// into one: the same rows, the same kernel, the same bits.
+for (k, rows) in [(288, [288, 96, 96]), (4096, [64, 32, 32]), (64, [5, 1])] {
+    let x = (0..<k).map { _ in rng.Float32() * 2 - 1 }
+    for d in gputest.Devices() {
+        let xb = try await d.Upload(x)
+        let m = rows.reduce(0, +)
+        // float32
+        var fparts: [gpu.Buffer<float32>] = [], fall: [float32] = []
+        for r in rows {
+            let w = (0..<(r * k)).map { _ in rng.Float32() - 0.5 }
+            fparts.append(try await d.Upload(w))
+            fall += w
+        }
+        let ys = try d.CreateBuffer(of: float32.self, count: m), yc = try d.CreateBuffer(of: float32.self, count: m)
+        try await linalg.Gemv(fparts, rows: rows, xb, into: ys, k: k)
+        try await linalg.Gemv(try await d.Upload(fall), xb, into: yc, m: m, k: k)
+        gputest.Equal("Gemv f32 stacked \(rows)x\(k)", d, try await ys.Download(), try await yc.Download())
+        // q4_0 and q8_0
+        for q8 in [false, true] {
+            var parts: [gpu.Buffer<uint8>] = [], all: [uint8] = []
+            for r in rows {
+                let w = blocks(q8, r, k)
+                parts.append(try await d.Upload(w))
+                all += w
+            }
+            if q8 {
+                try await linalg.Gemv(parts, rows: rows, dtype.Q8_0(), xb, into: ys, k: k)
+                try await linalg.Gemv(try await d.Upload(all), dtype.Q8_0(), xb, into: yc, m: m, k: k)
+            } else {
+                try await linalg.Gemv(parts, rows: rows, dtype.Q4_0(), xb, into: ys, k: k)
+                try await linalg.Gemv(try await d.Upload(all), dtype.Q4_0(), xb, into: yc, m: m, k: k)
+            }
+            gputest.Equal("Gemv \(q8 ? "q8_0" : "q4_0") stacked \(rows)x\(k)", d, try await ys.Download(), try await yc.Download())
+        }
+    }
+}
+
+// ---- k-quants: q4_K and q6_K ----
+
+// Random blocks with small finite scales where each format keeps them;
+// Gemv against the device's own decode (checked bit for bit against
+// ggml's in model's test-quant) dotted with x in float64.
+func kblocks(_ rows: int, _ k: int, _ bytes: int, _ scaleAt: [int]) -> [uint8] {
+    var out: [uint8] = []
+    for _ in 0..<(rows * k / 256) {
+        var b: [uint8] = []
+        for _ in 0..<bytes { b.append(uint8(truncatingIfNeeded: rng.Uint32())) }
+        for at in scaleAt {
+            let d = float16(rng.Float32() * 0.01 + 0.0005).bitPattern
+            b[at] = uint8(truncatingIfNeeded: d)
+            b[at + 1] = uint8(truncatingIfNeeded: d >> 8)
+        }
+        out += b
+    }
+    return out
+}
+
+func kquant<B: dtype.Block>(_ name: string, _ format: B, _ scaleAt: [int]) async throws {
+    for (m, k) in [(1, 256), (37, 768), (768, 2048), (100, 4096)] {
+        let w = kblocks(m, k, B.Bytes(), scaleAt)
+        let x = (0..<k).map { _ in rng.Float32() * 2 - 1 }
+        for d in gputest.Devices() {
+            let wb = try await d.Upload(w)
+            let dense = try d.CreateBuffer(of: float32.self, count: m * k)
+            try await dtype.Dequantize(wb, format, count: m * k, into: dense)
+            let dw = try await dense.Download()
+            var want: [float64] = [], bound: [float64] = []
+            for r in 0..<m {
+                var s: float64 = 0, a: float64 = 0
+                for c in 0..<k {
+                    s += float64(dw[r * k + c]) * float64(x[c])
+                    a += (float64(dw[r * k + c]) * float64(x[c])).magnitude
+                }
+                want.append(s)
+                bound.append(a * float64(k + 64) * 5.960464477539063e-08 + 1e-30)
+            }
+            let y = try d.CreateBuffer(of: float32.self, count: m)
+            try await linalg.Gemv(wb, format, try await d.Upload(x), into: y, m: m, k: k)
+            gputest.Near("Gemv \(name) \(m)x\(k)", d, try await y.Download(), want, bound: bound)
+        }
+    }
+}
+
+try await kquant("q4_K", dtype.Q4_K(), [0, 2])
+try await kquant("q6_K", dtype.Q6_K(), [208])
+
 try await quantized("q4_0", dtype.Q4_0(), false)
 try await quantized("q8_0", dtype.Q8_0(), true)
 

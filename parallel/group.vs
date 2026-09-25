@@ -29,7 +29,7 @@ public let MaxGroup = 1024
 @inlinable public func _pow2(_ n: int) -> int {
     var w = 1
     while w < n {
-        w *= 2
+        w = w &<< 1
     }
     return w
 }
@@ -42,7 +42,9 @@ public let MaxGroup = 1024
     let n = GroupCount()
     s[me] = x
     gpu.Barrier()
-    var stride = _pow2(n) / 2
+    // Halving by shifts: stride is never negative, and a division is a long
+    // routine on a GPU, paid at every step.
+    var stride = _pow2(n) &>> 1
     while stride > 0 {
         if me < stride && me + stride < n {
             let a = s[me]
@@ -56,7 +58,7 @@ public let MaxGroup = 1024
             }
         }
         gpu.Barrier()
-        stride /= 2
+        stride = stride &>> 1
     }
     let r = s[0]
     gpu.Barrier()
