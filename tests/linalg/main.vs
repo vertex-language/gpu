@@ -148,4 +148,66 @@ func halfMatmul<T: dtype.Number>(_ name: string, _ t: T.Type, eps: float64, tiny
 try await halfMatmul("f16", float16.self, eps: 4.8828125e-04, tiny: 5.960464477539063e-08)
 try await halfMatmul("bf16", bfloat16.self, eps: 3.90625e-03, tiny: 1e-38)
 
+// ---- block-quantized: q4_0 and q8_0 ----
+
+// ggml's dequantize_row_q4_0 and _q8_0, on the host: element j of the
+// block at byte at.
+func hostDecode(_ q8: bool, _ b: [uint8], _ at: int, _ j: int) -> float32 {
+    let d = float32(float16(bitPattern: uint16(b[at]) | uint16(b[at + 1]) << 8))
+    if q8 {
+        return float32(int8(bitPattern: b[at + 2 + j])) * d
+    }
+    let q = b[at + 2 + (j & 15)]
+    return float32(int32(j < 16 ? q & 0x0F : q >> 4) - 8) * d
+}
+
+// Random blocks: a scale of a size weights have, and random quants.
+func blocks(_ q8: bool, _ rows: int, _ k: int) -> [uint8] {
+    let size = q8 ? 34 : 18
+    var out: [uint8] = []
+    for _ in 0..<(rows * k / 32) {
+        let d = float16(rng.Float32() * 0.02 + 0.001).bitPattern
+        out.append(uint8(truncatingIfNeeded: d))
+        out.append(uint8(truncatingIfNeeded: d >> 8))
+        for _ in 0..<(size - 2) { out.append(uint8(truncatingIfNeeded: rng.Uint32())) }
+    }
+    return out
+}
+
+func quantized<B: dtype.Block>(_ name: string, _ format: B, _ q8: bool) async throws {
+    for (m, k) in [(1, 32), (7, 64), (288, 288), (768, 288), (288, 768), (100, 4096)] {
+        let w = blocks(q8, m, k)
+        var x: [float32] = []
+        for _ in 0..<k { x.append(rng.Float32() * 2 - 1) }
+        var dense: [float32] = [], want: [float64] = [], bound: [float64] = []
+        for r in 0..<m {
+            var s: float64 = 0, a: float64 = 0
+            for c in 0..<k {
+                let v = hostDecode(q8, w, (r * k + c) / 32 * B.Bytes(), c % 32)
+                dense.append(v)
+                s += float64(v) * float64(x[c])
+                a += (float64(v) * float64(x[c])).magnitude
+            }
+            want.append(s)
+            bound.append(a * float64(k + 34) * 5.960464477539063e-08 + 1e-30)
+        }
+        for d in gputest.Devices() {
+            let wb = try await d.Upload(w)
+            let deq = try await d.CreateBuffer(of: float32.self, count: m * k)
+            try await dtype.Dequantize(wb, format, count: m * k, into: deq)
+            gputest.Equal("Dequantize \(name) \(m)x\(k)", d, try await deq.Download(), dense)
+            // One row by itself, from its byte offset: an embedding lookup.
+            let row = try await d.CreateBuffer(of: float32.self, count: k)
+            try await dtype.Dequantize(wb, format, at: (m - 1) * (k / 32) * B.Bytes(), count: k, into: row)
+            gputest.Equal("Dequantize \(name) last row \(m)x\(k)", d, try await row.Download(), Array(dense[((m - 1) * k)..<(m * k)]))
+            let y = try await d.CreateBuffer(of: float32.self, count: m)
+            try await linalg.Gemv(wb, format, try await d.Upload(x), into: y, m: m, k: k)
+            gputest.Near("Gemv \(name) \(m)x\(k)", d, try await y.Download(), want, bound: bound)
+        }
+    }
+}
+
+try await quantized("q4_0", dtype.Q4_0(), false)
+try await quantized("q8_0", dtype.Q8_0(), true)
+
 gputest.Done()

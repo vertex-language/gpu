@@ -164,6 +164,36 @@ public struct Epilogue<T: dtype.Number> {
     try await _gemvKernel.Launch(a, x, y, m, k, over: m * 128, workgroup: 128)
 }
 
+@inlinable public func _gemvBlockKernel<B: dtype.Block>(_ f: B, _ w: gpu.Span<uint8>, _ x: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>, _ m: int, _ k: int) kernel {
+    // A row a workgroup, as Gemv: each work-item dots a strided part of
+    // the row's blocks, decoding them in place, and the group adds the
+    // parts in a fixed order.
+    let row = gpu.GroupIndex.x
+    let blocks = k / B.Size()
+    let base = row * blocks * B.Bytes()
+    var part: float32 = 0
+    var j = parallel.GroupRank()
+    while j < blocks {
+        part = part + B.Dot(w, base + j * B.Bytes(), x, j * B.Size())
+        j += parallel.GroupCount()
+    }
+    let total = parallel.GroupSum(part)
+    if parallel.GroupRank() == 0 && row < m {
+        y[row] = total
+    }
+}
+
+/// Gemv is y = W · x with W block-quantized: m rows of k elements, each
+/// row k / format.Size() blocks of the format, one after another -- a GGUF
+/// tensor's bytes as they are. x and y are float32; the sum is taken in
+/// float32. What decoding a quantized model is made of.
+@inlinable public func Gemv<B: dtype.Block>(_ w: gpu.Buffer<uint8>, _ format: B, _ x: gpu.Buffer<float32>, into y: gpu.Buffer<float32>, m: int, k: int) async throws {
+    if m == 0 {
+        return
+    }
+    try await _gemvBlockKernel.Launch(format, w, x, y, m, k, over: m * 128, workgroup: 128)
+}
+
 @inlinable public func _transposeKernel<T: dtype.Number>(_ x: gpu.Span<T>, _ y: gpu.MutableSpan<T>, _ rows: int, _ cols: int) kernel {
     let tile = gpu.Shared<T>(count: 272) // 16 x 17: a column read is no bank conflict
     let lx = gpu.LocalIndex.x
