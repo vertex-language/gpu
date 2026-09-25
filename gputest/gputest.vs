@@ -72,6 +72,27 @@ public func Close(_ what: string, _ d: gpu.Device, _ got: [float32], _ want: [fl
     _record(what, d, "")
 }
 
+/// Near checks that each element of got is within bound[i] of want[i]:
+/// for a result whose error is bounded by what it was computed from rather
+/// than by its own size, as a dot product's is by k·ε·Σ|a·b| however much
+/// its terms cancel.
+public func Near(_ what: string, _ d: gpu.Device, _ got: [float32], _ want: [float64], bound: [float64]) {
+    if got.count != want.count || bound.count != want.count {
+        _record(what, d, "got \(got.count) elements, want \(want.count)")
+        return
+    }
+    var i = 0
+    while i < got.count {
+        let err = abs(float64(got[i]) - want[i])
+        if !(err <= bound[i]) {
+            _record(what, d, "element \(i) is \(got[i]), want \(want[i]) within \(bound[i])")
+            return
+        }
+        i += 1
+    }
+    _record(what, d, "")
+}
+
 /// _ulpDistance is how many representable float32s apart a and b are; NaN
 /// is equal only to NaN.
 func _ulpDistance(_ a: float32, _ b: float32) -> int {

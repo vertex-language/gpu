@@ -1,0 +1,190 @@
+// Dense linear algebra over row-major buffers: Matmul with a fused
+// epilogue, Gemv, Transpose.
+//
+// Matmul is tiled through shared storage: each workgroup computes a 16x16
+// block of C, walking K sixteen at a time, and each work-item one element
+// of it. Every element's sum is taken in the order of k, so a result is
+// the same on every device that rounds each multiply and add, and differs
+// only where a device fuses them.
+import "gpu"
+import "gpu/dtype"
+import "gpu/parallel"
+
+/// Activation is applied to each element of a Matmul's result, after
+/// scale, bias and residual. GELU and SiLU wait on math inside kernels.
+public enum Activation {
+    case None
+    case ReLU
+
+    public var _code: int32 {
+        switch self {
+        case .None: return 0
+        case .ReLU: return 1
+        }
+    }
+}
+
+/// _at is element (row, col) of a row-major matrix with cols columns,
+/// read transposed where t holds.
+@inlinable public func _at<T: dtype.Number>(_ x: gpu.Span<T>, _ base: int, _ row: int, _ col: int, _ rows: int, _ cols: int, _ t: bool) -> T {
+    if t {
+        return x[base + col * rows + row]
+    }
+    return x[base + row * cols + col]
+}
+
+@inlinable public func _matmulKernel<T: dtype.Number>(
+    _ a: gpu.Span<T>, _ b: gpu.Span<T>, _ c: gpu.MutableSpan<T>,
+    _ bias: gpu.Span<T>, _ residual: gpu.Span<T>,
+    _ m: int, _ n: int, _ k: int,
+    _ strideA: int, _ strideB: int, _ strideC: int,
+    _ ta: bool, _ tb: bool,
+    _ scale: T, _ hasBias: bool, _ hasResidual: bool, _ activation: int32
+) kernel {
+    let ta16 = gpu.Shared<T>(count: 256)
+    let tb16 = gpu.Shared<T>(count: 256)
+    let lx = gpu.LocalIndex.x
+    let ly = gpu.LocalIndex.y
+    let col = gpu.GroupIndex.x * 16 + lx
+    let row = gpu.GroupIndex.y * 16 + ly
+    let batch = gpu.GroupIndex.z
+    let baseA = batch * strideA
+    let baseB = batch * strideB
+    var sum: T = 0
+    var t = 0
+    while t < k {
+        // A's rows x t..t+16, and B's t..t+16 x columns, zero past the edges.
+        let ak = t + lx
+        ta16[ly * 16 + lx] = row < m && ak < k ? _at(a, baseA, row, ak, m, k, ta) : 0
+        let bk = t + ly
+        tb16[ly * 16 + lx] = bk < k && col < n ? _at(b, baseB, bk, col, k, n, tb) : 0
+        gpu.Barrier()
+        var i = 0
+        while i < 16 {
+            sum = sum + ta16[ly * 16 + i] * tb16[i * 16 + lx]
+            i += 1
+        }
+        gpu.Barrier()
+        t += 16
+    }
+    if row < m && col < n {
+        let at = batch * strideC + row * n + col
+        var v = sum * scale
+        if hasBias {
+            v = v + bias[col]
+        }
+        if hasResidual {
+            v = v + residual[at]
+        }
+        if activation == 1 && v < 0 {
+            v = 0
+        }
+        c[at] = v
+    }
+}
+
+/// Shape is a matrix product's problem: C (m x n) = A (m x k) · B (k x n),
+/// batch of them laid end to end, with A or B read transposed -- stored
+/// k x m, or n x k.
+public struct Shape {
+    public var m: int
+    public var n: int
+    public var k: int
+    public var batch: int
+    public var transposeA: bool
+    public var transposeB: bool
+
+    public init(m: int, n: int, k: int, batch: int = 1, transposeA: bool = false, transposeB: bool = false) {
+        self.m = m
+        self.n = n
+        self.k = k
+        self.batch = batch
+        self.transposeA = transposeA
+        self.transposeB = transposeB
+    }
+}
+
+/// Epilogue is what Matmul does to each element of A · B before it writes
+/// it: C = activation(scale · (A · B) + bias[column] + residual). It is
+/// applied inside the kernel that computes the product, so it costs no
+/// extra pass over C.
+public struct Epilogue<T: dtype.Number> {
+    public var scale: T
+    public var bias: gpu.Buffer<T>?
+    public var residual: gpu.Buffer<T>?
+    public var activation: Activation
+
+    public init(scale: T, bias: gpu.Buffer<T>?, residual: gpu.Buffer<T>?, activation: Activation) {
+        self.scale = scale
+        self.bias = bias
+        self.residual = residual
+        self.activation = activation
+    }
+}
+
+/// Matmul is C = A · B for the problem shape: all row-major.
+@inlinable public func Matmul<T: dtype.Number>(_ a: gpu.Buffer<T>, _ b: gpu.Buffer<T>, into c: gpu.Buffer<T>, _ shape: Shape) async throws {
+    try await Matmul(a, b, into: c, shape, Epilogue<T>(scale: 1, bias: nil, residual: nil, activation: .None))
+}
+
+/// Matmul is C = epilogue(A · B) for the problem shape.
+@inlinable public func Matmul<T: dtype.Number>(_ a: gpu.Buffer<T>, _ b: gpu.Buffer<T>, into c: gpu.Buffer<T>, _ s: Shape, _ e: Epilogue<T>) async throws {
+    if s.m == 0 || s.n == 0 || s.batch == 0 {
+        return
+    }
+    try await _matmulKernel.Launch(a, b, c, e.bias ?? c, e.residual ?? c, s.m, s.n, s.k, s.m * s.k, s.k * s.n, s.m * s.n,
+                                   s.transposeA, s.transposeB, e.scale, e.bias != nil, e.residual != nil, e.activation._code,
+                                   over: ((s.n + 15) / 16 * 16, (s.m + 15) / 16 * 16, s.batch), workgroup: (16, 16, 1))
+}
+
+@inlinable public func _gemvKernel<T: dtype.Number>(_ a: gpu.Span<T>, _ x: gpu.Span<T>, _ y: gpu.MutableSpan<T>, _ m: int, _ k: int) kernel {
+    // A row a workgroup: each work-item sums a strided part of it, and the
+    // group adds the parts in a fixed order.
+    let row = gpu.GroupIndex.x
+    var part: T = 0
+    var j = parallel.GroupRank()
+    while j < k {
+        part = part + a[row * k + j] * x[j]
+        j += parallel.GroupCount()
+    }
+    let total = parallel.GroupSum(part)
+    if parallel.GroupRank() == 0 && row < m {
+        y[row] = total
+    }
+}
+
+/// Gemv is y = A · x: A is m x k, row-major; x has k elements and y m.
+/// The matrix-vector product decoding a model is made of.
+@inlinable public func Gemv<T: dtype.Number>(_ a: gpu.Buffer<T>, _ x: gpu.Buffer<T>, into y: gpu.Buffer<T>, m: int, k: int) async throws {
+    if m == 0 {
+        return
+    }
+    try await _gemvKernel.Launch(a, x, y, m, k, over: m * 128, workgroup: 128)
+}
+
+@inlinable public func _transposeKernel<T: dtype.Number>(_ x: gpu.Span<T>, _ y: gpu.MutableSpan<T>, _ rows: int, _ cols: int) kernel {
+    let tile = gpu.Shared<T>(count: 272) // 16 x 17: a column read is no bank conflict
+    let lx = gpu.LocalIndex.x
+    let ly = gpu.LocalIndex.y
+    let c = gpu.GroupIndex.x * 16 + lx
+    let r = gpu.GroupIndex.y * 16 + ly
+    if r < rows && c < cols {
+        tile[ly * 17 + lx] = x[r * cols + c]
+    }
+    gpu.Barrier()
+    let oc = gpu.GroupIndex.y * 16 + lx
+    let orow = gpu.GroupIndex.x * 16 + ly
+    if orow < cols && oc < rows {
+        y[orow * rows + oc] = tile[lx * 17 + ly]
+    }
+}
+
+/// Transpose writes the rows x cols row-major matrix x into y as its
+/// cols x rows transpose.
+@inlinable public func Transpose<T: dtype.Number>(_ x: gpu.Buffer<T>, into y: gpu.Buffer<T>, rows: int, cols: int) async throws {
+    if rows == 0 || cols == 0 {
+        return
+    }
+    try await _transposeKernel.Launch(x, y, rows, cols,
+                                      over: ((cols + 15) / 16 * 16, (rows + 15) / 16 * 16), workgroup: (16, 16))
+}

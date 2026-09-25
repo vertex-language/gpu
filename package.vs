@@ -10,10 +10,12 @@ let package = Package(
     products: [
         .library(name: "gpu/dtype", targets: ["dtype"]),
         .library(name: "gpu/parallel", targets: ["parallel"]),
+        .library(name: "gpu/linalg", targets: ["linalg"]),
         .library(name: "gpu/random", targets: ["random"]),
         .library(name: "gpu/gputest", targets: ["gputest"]),
         .executable(name: "test-parallel", targets: ["test_parallel"]),
         .executable(name: "test-random", targets: ["test_random"]),
+        .executable(name: "test-linalg", targets: ["test_linalg"]),
     ],
     targets: [
         // Reduce, scan and sort, as host operations and as group-scope
@@ -27,6 +29,12 @@ let package = Package(
             name: "parallel",
             dependencies: ["dtype"],
             path: "parallel"
+        ),
+        // Dense linear algebra: Matmul with epilogues, Gemv, Transpose.
+        .target(
+            name: "linalg",
+            dependencies: ["dtype", "parallel"],
+            path: "linalg"
         ),
         // Counter-based random numbers: keys, streams, fills.
         .target(
@@ -48,6 +56,11 @@ let package = Package(
             name: "test_random",
             dependencies: ["random", "gputest"],
             path: "tests/random"
+        ),
+        .executableTarget(
+            name: "test_linalg",
+            dependencies: ["linalg", "dtype", "gputest"],
+            path: "tests/linalg"
         ),
     ]
 )
