@@ -472,3 +472,9 @@ gpu/
 | `internal/select` | `internal/dispatch` + public `gpu/gputest` | Choosing an image is internal; the oracle harness is useful to everyone |
 | — | `gpu/layout`, `gpu/sparse` | Strided views are the common language; sparse is the fourth shape of data, after dense, image and spatial |
 | `gpu/dtype` `Block` | `dtype.Scaled` | MX, NVFP4, GGUF k-quants and group quantization are one idea |
+
+---
+
+## License
+
+[MIT](LICENSE)
