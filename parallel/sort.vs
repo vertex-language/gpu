@@ -8,11 +8,10 @@
 // their order, which is what makes the next pass's work stand on this
 // one's, and the whole sort stable.
 //
-// int32 and float32 keys are sorted as the uint32s whose order is theirs:
-// the sign bit flipped for an int32; for a float32, every bit flipped if
-// it is negative and the sign bit if not, which is IEEE 754's total
-// order (-NaN < -inf < ... < -0 < +0 < ... < +inf < +NaN).
+// Any Number is sorted as the uint32s whose order is its order
+// (dtype.Number.OrderKey): for a float, IEEE 754's total order.
 import "gpu"
+import "gpu/dtype"
 
 func _radixCount(_ keys: gpu.Span<uint32>, _ counts: gpu.MutableSpan<uint32>, _ n: int, _ shift: uint32, _ groups: int) kernel {
     let hist = gpu.Shared<uint32>(count: 16)
@@ -80,8 +79,8 @@ func _radixPlace(_ keys: gpu.Span<uint32>, _ values: gpu.Span<uint32>, _ outKeys
 }
 
 /// _radixSort sorts keys, and values with them where withValues holds, in
-/// place.
-func _radixSort(_ keys: gpu.Buffer<uint32>, _ values: gpu.Buffer<uint32>, _ withValues: bool) async throws {
+/// place. The generic Sort calls it for every key type.
+public func _radixSort(_ keys: gpu.Buffer<uint32>, _ values: gpu.Buffer<uint32>, _ withValues: bool) async throws {
     let n = keys.count
     if n < 2 {
         return
@@ -112,85 +111,45 @@ func _radixSort(_ keys: gpu.Buffer<uint32>, _ values: gpu.Buffer<uint32>, _ with
     // Eight passes: the sorted keys are back in the caller's buffers.
 }
 
-/// Sort puts keys in ascending order, in place. The sort is stable.
-public func Sort(_ keys: gpu.Buffer<uint32>) async throws {
-    try await _radixSort(keys, keys, false)
+@inlinable public func _toOrderKeys<T: dtype.Number>(_ x: gpu.Span<T>, _ out: gpu.MutableSpan<uint32>, _ descending: bool) kernel {
+    let i = gpu.Index.x
+    if i < x.count {
+        let k = T.OrderKey(x[i])
+        out[i] = descending ? ~k : k
+    }
+}
+
+@inlinable public func _fromOrderKeys<T: dtype.Number>(_ k: gpu.Span<uint32>, _ out: gpu.MutableSpan<T>) kernel {
+    let i = gpu.Index.x
+    if i < k.count {
+        out[i] = T.FromOrderKey(k[i])
+    }
+}
+
+/// _sortBy sorts keys as their order keys, moving values with them where
+/// withValues holds.
+@inlinable public func _sortBy<T: dtype.Number>(_ keys: gpu.Buffer<T>, _ values: gpu.Buffer<uint32>, _ withValues: bool) async throws {
+    let n = keys.count
+    if n < 2 {
+        return
+    }
+    let bits = try await keys.Device.CreateBuffer(of: uint32.self, count: n)
+    try await _toOrderKeys.Launch(keys, bits, false, over: n)
+    try await _radixSort(bits, withValues ? values : bits, withValues)
+    try await _fromOrderKeys.Launch(bits, keys, over: n)
+}
+
+/// Sort puts keys in ascending order, in place: for floats, IEEE 754's
+/// total order, -0 before +0 and NaNs at the ends by sign. The sort is
+/// stable.
+@inlinable public func Sort<T: dtype.Number>(_ keys: gpu.Buffer<T>) async throws {
+    let none = try await keys.Device.CreateBuffer(of: uint32.self, count: 1)
+    try await _sortBy(keys, none, false)
 }
 
 /// Sort puts keys in ascending order and moves each value with its key:
 /// values[i] ends up beside the key it started beside. Equal keys keep
 /// their order.
-public func Sort(_ keys: gpu.Buffer<uint32>, values: gpu.Buffer<uint32>) async throws {
-    try await _radixSort(keys, values, true)
-}
-
-func _orderInt32(_ x: gpu.Span<int32>, _ out: gpu.MutableSpan<uint32>, _ n: int) kernel {
-    let i = gpu.Index.x
-    if i < n {
-        out[i] = uint32(bitPattern: x[i]) ^ 0x80000000
-    }
-}
-
-func _unorderInt32(_ x: gpu.Span<uint32>, _ out: gpu.MutableSpan<int32>, _ n: int) kernel {
-    let i = gpu.Index.x
-    if i < n {
-        out[i] = int32(bitPattern: x[i] ^ 0x80000000)
-    }
-}
-
-func _orderFloat32(_ x: gpu.Span<float32>, _ out: gpu.MutableSpan<uint32>, _ n: int) kernel {
-    let i = gpu.Index.x
-    if i < n {
-        let b = x[i].bitPattern
-        out[i] = (b & 0x80000000) != 0 ? ~b : (b | 0x80000000)
-    }
-}
-
-func _unorderFloat32(_ x: gpu.Span<uint32>, _ out: gpu.MutableSpan<float32>, _ n: int) kernel {
-    let i = gpu.Index.x
-    if i < n {
-        let b = x[i]
-        out[i] = float32(bitPattern: (b & 0x80000000) != 0 ? (b & 0x7FFFFFFF) : ~b)
-    }
-}
-
-/// Sort puts int32 keys in ascending order, in place, stably.
-public func Sort(_ keys: gpu.Buffer<int32>) async throws {
-    try await _sortInt32(keys, keys.Device.CreateBuffer(of: uint32.self, count: 1), false)
-}
-
-/// Sort puts int32 keys in ascending order and moves each value with its
-/// key.
-public func Sort(_ keys: gpu.Buffer<int32>, values: gpu.Buffer<uint32>) async throws {
-    try await _sortInt32(keys, values, true)
-}
-
-func _sortInt32(_ keys: gpu.Buffer<int32>, _ values: gpu.Buffer<uint32>, _ withValues: bool) async throws {
-    let n = keys.count
-    if n < 2 { return }
-    let bits = try await keys.Device.CreateBuffer(of: uint32.self, count: n)
-    try await _orderInt32.Launch(keys, bits, n, over: n)
-    try await _radixSort(bits, withValues ? values : bits, withValues)
-    try await _unorderInt32.Launch(bits, keys, n, over: n)
-}
-
-/// Sort puts float32 keys in IEEE 754 total order, in place, stably: -0
-/// before +0, and NaNs at the ends by sign.
-public func Sort(_ keys: gpu.Buffer<float32>) async throws {
-    try await _sortFloat32(keys, keys.Device.CreateBuffer(of: uint32.self, count: 1), false)
-}
-
-/// Sort puts float32 keys in total order and moves each value with its
-/// key.
-public func Sort(_ keys: gpu.Buffer<float32>, values: gpu.Buffer<uint32>) async throws {
-    try await _sortFloat32(keys, values, true)
-}
-
-func _sortFloat32(_ keys: gpu.Buffer<float32>, _ values: gpu.Buffer<uint32>, _ withValues: bool) async throws {
-    let n = keys.count
-    if n < 2 { return }
-    let bits = try await keys.Device.CreateBuffer(of: uint32.self, count: n)
-    try await _orderFloat32.Launch(keys, bits, n, over: n)
-    try await _radixSort(bits, withValues ? values : bits, withValues)
-    try await _unorderFloat32.Launch(bits, keys, n, over: n)
+@inlinable public func Sort<T: dtype.Number>(_ keys: gpu.Buffer<T>, values: gpu.Buffer<uint32>) async throws {
+    try await _sortBy(keys, values, true)
 }

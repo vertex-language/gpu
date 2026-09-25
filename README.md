@@ -10,7 +10,7 @@ sorts, scans, matrix multiplies, FFTs, random streams, BVHs and attention
 kernels that AI, 3D, media, simulation and data packages all need, written
 once as `.vs` kernels. Everyone else calls them instead of shipping their own.
 
-> **Status: early.** Three packages are built and tested on Metal and the
+> **Status: early.** Four packages are built and tested on Metal and the
 > CPU device; the rest of this document is the blueprint they grow into.
 > The `proposed_ai_packages.md` and `proposed_3d_packages.md` design docs
 > were a sketch. Where this document differs from them, this one wins
@@ -18,7 +18,8 @@ once as `.vs` kernels. Everyone else calls them instead of shipping their own.
 
 | Package | Built | Tested |
 | --- | --- | --- |
-| `gpu/parallel` | `Reduce` (`.Sum .Min .Max`), `Scan` (inclusive, exclusive), `Sort` (stable radix; `uint32`, `int32`, `float32` keys in total order; optional `uint32` values), `TopK`, `Select`, `SelectIndices`, `Count` (with `Where`, exact for integers), `Gather`, `Scatter`, `ScatterAdd`, `Histogram`, `Iota`. Device functions `GroupSum`, `GroupMin`, `GroupMax`, `GroupScan`, `GroupExclusiveScan`, `GroupRank`, `GroupCount`. Each over `float32`, `int32` and `uint32` | 1434 checks: every size from 0 to 300,000 around the group boundaries, every group size to 1024; results bit-identical on Metal and the CPU device |
+| `gpu/dtype` | `Number`: the protocol kernels compute with (`float32`, `int32`, `uint32`), with the identities, wrapping sum, order key and atomic add the other packages need | through every package above it |
+| `gpu/parallel` | Generic over `dtype.Number`, one definition each: `Reduce` (`.Sum .Min .Max`), `Scan` (inclusive, exclusive), `Sort` (stable radix in total order; optional `uint32` values), `TopK`, `Select`, `SelectIndices`, `Count` (with `Where`, exact for integers), `Gather`, `Scatter`, `ScatterAdd`, `Histogram`, `Iota`. Device functions `GroupSum`, `GroupMin`, `GroupMax`, `GroupScan`, `GroupExclusiveScan`, `GroupRank`, `GroupCount` | 1434 checks, at `float32`, `int32` and `uint32`: every size from 0 to 300,000 around the group boundaries, every group size to 1024; results bit-identical on Metal and the CPU device |
 | `gpu/random` | Philox4x32-10: `Key`, `Split`, `Fold`, `Block`, `Bits`, `Uint32`, `Uniform`, `Below`, `Bernoulli`; `Fill` for `float32` and `uint32` buffers | Random123's known answers; every device bit-identical to the host |
 | `gpu/gputest` | `Devices`, `Equal`, `Close` (ULPs), `Random`, `Sizes`, `Done` | the harness the others are tested with |
 
@@ -139,8 +140,9 @@ In practice this means:
 - Parameters are numbers, `bool`, `gpu.Span` / `gpu.MutableSpan`, and plain
   structs of those.
 - Behaviour is chosen by **enum values and specialization**, not by
-  closures or existentials. `parallel.Reduce(xs, .Max)` gets a device image
-  for `.Max`. It does not branch on the operator at run time.
+  closures or existentials. A function over elements is generic over
+  `dtype.Number` and `@inlinable`, with its kernels `@inlinable` too, so
+  the module that calls it builds it for its element types.
 - Constant tables (bit-reversal permutations, Sobol direction numbers,
   BRDF lookup tables) arrive as buffers or as literals that fold away once
   inlined. They are never globals.
@@ -431,7 +433,7 @@ gpu/
 | `@inlinable` across modules | device functions, called from other modules' kernels | built: functions, methods and initializers |
 | Fast barriers on the CPU device | the CPU device as oracle and fallback | built: a group's work-items run as fibers (arm64) |
 | CUDA and HIP images for `.vs` | NVIDIA and AMD | not started |
-| Generic kernels | one source per op across dtypes | not started (images per dtype come from specialization) |
+| Generic kernels | one source per op across dtypes | built: each launch's specialization is its own image |
 | vsc `Float16` / `BFloat16` | half-precision anything | VIR has both, and every backend runs them; the language types are next |
 | fp8/fp6/fp4 storage types in VIR | `dtype.Scaled` on the device | reserved |
 | Wave-matrix instructions in VIR | `linalg.Tile` at tensor-core speed | reserved; plain FMAs until then |
