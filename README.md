@@ -3,18 +3,26 @@
 [![package: core](https://img.shields.io/badge/package-core-f4f4f5?style=flat-square&labelColor=e4e4e7&color=18181b)](https://github.com/vertex-language)
 [![devices: metal | cuda | hip | cpu](https://img.shields.io/badge/devices-metal%20%7C%20cuda%20%7C%20hip%20%7C%20cpu-f4f4f5?style=flat-square&labelColor=e4e4e7&color=18181b)](https://github.com/vertex-language/gpu)
 [![kernels: .vs](https://img.shields.io/badge/kernels-.vs-f4f4f5?style=flat-square&labelColor=e4e4e7&color=18181b)](https://github.com/vertex-language/gpu)
-[![status: blueprint](https://img.shields.io/badge/status-blueprint-f4f4f5?style=flat-square&labelColor=e4e4e7&color=18181b)](https://github.com/vertex-language/gpu)
+[![status: early](https://img.shields.io/badge/status-early-f4f4f5?style=flat-square&labelColor=e4e4e7&color=18181b)](https://github.com/vertex-language/gpu)
 
 The shared library of accelerated functions for Vertex. These are the
 sorts, scans, matrix multiplies, FFTs, random streams, BVHs and attention
 kernels that AI, 3D, media, simulation and data packages all need, written
 once as `.vs` kernels. Everyone else calls them instead of shipping their own.
 
-> **Status: blueprint.** No package here is built yet. This document
-> defines the packages, how they are named, and what earns a place here.
+> **Status: early.** Three packages are built and tested on Metal and the
+> CPU device; the rest of this document is the blueprint they grow into.
 > The `proposed_ai_packages.md` and `proposed_3d_packages.md` design docs
 > were a sketch. Where this document differs from them, this one wins
 > (see [From the sketch](#from-the-sketch)).
+
+| Package | Built | Tested |
+| --- | --- | --- |
+| `gpu/parallel` | `Reduce` (`.Sum .Min .Max`), `Scan` (inclusive, exclusive), `Sort` (stable radix; `uint32`, `int32`, `float32` keys in total order; optional `uint32` values). Device functions `GroupSum`, `GroupMin`, `GroupMax`, `GroupScan`, `GroupExclusiveScan`, `GroupRank`, `GroupCount`. Each over `float32`, `int32` and `uint32` | 356 checks: every size from 0 to 300,000 around the group boundaries, every group size to 1024; results bit-identical on Metal and the CPU device |
+| `gpu/random` | Philox4x32-10: `Key`, `Split`, `Fold`, `Block`, `Bits`, `Uint32`, `Uniform`, `Below`, `Bernoulli`; `Fill` for `float32` and `uint32` buffers | Random123's known answers; every device bit-identical to the host |
+| `gpu/gputest` | `Devices`, `Equal`, `Close` (ULPs), `Random`, `Sizes`, `Done` | the harness the others are tested with |
+
+Run the tests with `vsc run test-parallel` and `vsc run test-random`.
 
 ---
 
@@ -420,6 +428,8 @@ gpu/
 | Needs | For | Where it stands |
 | --- | --- | --- |
 | `.vs` kernels, `import "gpu"`, `Launch`, `Map` | everything | built for Metal and the CPU |
+| `@inlinable` across modules | device functions, called from other modules' kernels | built: functions, methods and initializers |
+| Fast barriers on the CPU device | the CPU device as oracle and fallback | built: a group's work-items run as fibers (arm64) |
 | CUDA and HIP images for `.vs` | NVIDIA and AMD | not started |
 | Generic kernels | one source per op across dtypes | not started (images per dtype come from specialization) |
 | vsc `Float16` / `BFloat16` | half-precision anything | VIR has both, and every backend runs them; the language types are next |
