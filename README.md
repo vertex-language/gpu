@@ -10,7 +10,7 @@ sorts, scans, matrix multiplies, FFTs, random streams, BVHs and attention
 kernels that AI, 3D, media, simulation and data packages all need, written
 once as `.vs` kernels. Everyone else calls them instead of shipping their own.
 
-> **Status: early.** Six packages are built and tested on Metal and the
+> **Status: early.** Seven packages are built and tested on Metal and the
 > CPU device; the rest of this document is the blueprint they grow into.
 > The `proposed_ai_packages.md` and `proposed_3d_packages.md` design docs
 > were a sketch. Where this document differs from them, this one wins
@@ -22,10 +22,11 @@ once as `.vs` kernels. Everyone else calls them instead of shipping their own.
 | `gpu/parallel` | Generic over `dtype.Number`, one definition each: `Reduce` (`.Sum .Min .Max`), `Scan` (inclusive, exclusive), `Sort` (stable radix in total order; optional `uint32` values), `TopK`, `Select`, `SelectIndices`, `Count` (with `Where`, exact for integers), `Gather`, `Scatter`, `ScatterAdd`, `Histogram`, `Iota`. Device functions `GroupSum`, `GroupMin`, `GroupMax`, `GroupScan`, `GroupExclusiveScan`, `GroupRank`, `GroupCount` | 1434 checks, at `float32`, `int32` and `uint32`: every size from 0 to 300,000 around the group boundaries, every group size to 1024; results bit-identical on Metal and the CPU device |
 | `gpu/linalg` | `Matmul` over a `Shape` (m, n, k, batch, transposes) with an optional fused `Epilogue` (scale, bias, residual, `.ReLU`), tiled through shared storage; `Gemv`; `Transpose`. Generic over `dtype.Number` | 127 checks: odd shapes, batches, transposes and the epilogue; `int32` exactly, `float32` within k·ε·Σ\|a·b\| of an `f64` host product |
 | `gpu/neural` | `Softmax`, `LogSoftmax`, `LogSumExp`, `RMSNorm`, `LayerNorm` (a workgroup a row, fixed-order sums), `Activate` and `Gated` (`.ReLU .GELU .GELUTanh .SiLU .Sigmoid .Tanh`, cancellation-free in the tails), `RoPE`, `CrossEntropy`; float32, over the `math` package | 129 checks against float64 libm references within bounds derived from the inputs; every device bit-identical to the CPU device |
+| `gpu/attention` | `Forward`: FlashAttention's online softmax over key blocks (no scores matrix), a workgroup per query row; `Mask` `.None`, `.Causal` (with a KV-cache offset), `.SlidingWindow(n)`; grouped- and multi-query heads through `Shape`; head dims to 128; float32 | 54 checks against float64 attention on the host; every device bit-identical to the CPU device |
 | `gpu/random` | Philox4x32-10: `Key`, `Split`, `Fold`, `Block`, `Bits`, `Uint32`, `Uniform`, `Normal` (Box–Muller), `Below`, `Bernoulli`; `Fill` for `float32` and `uint32` buffers, `FillNormal` | Random123's known answers; every device bit-identical to the host; `Normal`'s moments |
 | `gpu/gputest` | `Devices`, `Equal`, `Close` (ULPs), `Near` (an absolute bound per element), `Random`, `Sizes`, `Done` | the harness the others are tested with |
 
-Run the tests with `vsc run test-parallel`, `test-linalg`, `test-neural` and `test-random` (with `-update` the first time, to fetch `math`).
+Run the tests with `vsc run test-parallel`, `test-linalg`, `test-neural`, `test-attention` and `test-random` (with `-update` the first time, to fetch `math`).
 
 ---
 
