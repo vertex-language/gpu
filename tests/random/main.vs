@@ -56,4 +56,21 @@ for n in [1, 1000, 100000] {
     }
 }
 
+// Normal: every device gives the host's deviates; their mean and
+// variance are those of a standard normal.
+do {
+    let n = 100000
+    var want: [float32] = []
+    for i in 0..<n { want.append(random.Normal(key, uint64(i))) }
+    for d in gputest.Devices() {
+        let b = try await d.CreateBuffer(of: float32.self, count: n)
+        try await random.FillNormal(b, key)
+        gputest.Equal("FillNormal/\(n)", d, try await b.Download(), want)
+    }
+    var sum: float64 = 0, sq: float64 = 0
+    for v in want { sum += float64(v); sq += float64(v) * float64(v) }
+    let mean = sum / float64(n), variance = sq / float64(n) - mean * mean
+    gputest._record("Normal moments", host, mean.magnitude < 0.01 && (variance - 1).magnitude < 0.02 ? "" : "mean \(mean), variance \(variance)")
+}
+
 gputest.Done()

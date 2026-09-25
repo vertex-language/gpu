@@ -9,6 +9,7 @@
 // keys rather than advanced, so that no two users of randomness ever
 // share a stream by accident.
 import "gpu"
+import "math"
 
 /// Key names one stream of random numbers. It is two words, a plain
 /// value, so a kernel can take one (as its two words) and make it again.
@@ -126,4 +127,29 @@ public func Fill(_ b: gpu.Buffer<float32>, _ key: Key, start: uint64 = 0) async 
 public func Fill(_ b: gpu.Buffer<uint32>, _ key: Key, start: uint64 = 0) async throws {
     if b.count == 0 { return }
     try await _fillBits.Launch(b, key.lo, key.hi, start, over: b.count)
+}
+
+/// Normal is element i of key's stream as a standard normal deviate (mean
+/// 0, variance 1), by the Box–Muller transform of the element's first two
+/// words.
+@inlinable public func Normal(_ key: Key, _ i: uint64) -> float32 {
+    let b = Bits(key, i)
+    // u in (0, 1]: never zero, whose logarithm is -infinity.
+    let u = (float32(b.0 >> 8) + 1) * 5.9604645e-08
+    let v = float32(b.1 >> 8) * 5.9604645e-08
+    return math.Sqrt(-2 * math.Log(u)) * math.Cos(6.2831855 * v)
+}
+
+func _fillNormal(_ out: gpu.MutableSpan<float32>, _ lo: uint32, _ hi: uint32, _ start: uint64) kernel {
+    let i = gpu.Index.x
+    if i < out.count {
+        out[i] = Normal(Key(lo: lo, hi: hi), start + uint64(i))
+    }
+}
+
+/// FillNormal writes elements start, start+1, ... of key's stream into b,
+/// as standard normal deviates.
+public func FillNormal(_ b: gpu.Buffer<float32>, _ key: Key, start: uint64 = 0) async throws {
+    if b.count == 0 { return }
+    try await _fillNormal.Launch(b, key.lo, key.hi, start, over: b.count)
 }

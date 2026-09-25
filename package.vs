@@ -11,11 +11,13 @@ let package = Package(
         .library(name: "gpu/dtype", targets: ["dtype"]),
         .library(name: "gpu/parallel", targets: ["parallel"]),
         .library(name: "gpu/linalg", targets: ["linalg"]),
+        .library(name: "gpu/neural", targets: ["neural"]),
         .library(name: "gpu/random", targets: ["random"]),
         .library(name: "gpu/gputest", targets: ["gputest"]),
         .executable(name: "test-parallel", targets: ["test_parallel"]),
         .executable(name: "test-random", targets: ["test_random"]),
         .executable(name: "test-linalg", targets: ["test_linalg"]),
+        .executable(name: "test-neural", targets: ["test_neural"]),
     ],
     targets: [
         // Reduce, scan and sort, as host operations and as group-scope
@@ -35,6 +37,13 @@ let package = Package(
             name: "linalg",
             dependencies: ["dtype", "parallel"],
             path: "linalg"
+        ),
+        // Neural-network building blocks: softmax, norms, activations,
+        // RoPE, cross entropy.
+        .target(
+            name: "neural",
+            dependencies: ["parallel"],
+            path: "neural"
         ),
         // Counter-based random numbers: keys, streams, fills.
         .target(
@@ -61,6 +70,11 @@ let package = Package(
             name: "test_linalg",
             dependencies: ["linalg", "dtype", "gputest"],
             path: "tests/linalg"
+        ),
+        .executableTarget(
+            name: "test_neural",
+            dependencies: ["neural", "gputest"],
+            path: "tests/neural"
         ),
     ]
 )
