@@ -18,7 +18,7 @@ once as `.vs` kernels. Everyone else calls them instead of shipping their own.
 
 | Package | Built | Tested |
 | --- | --- | --- |
-| `gpu/parallel` | `Reduce` (`.Sum .Min .Max`), `Scan` (inclusive, exclusive), `Sort` (stable radix; `uint32`, `int32`, `float32` keys in total order; optional `uint32` values). Device functions `GroupSum`, `GroupMin`, `GroupMax`, `GroupScan`, `GroupExclusiveScan`, `GroupRank`, `GroupCount`. Each over `float32`, `int32` and `uint32` | 356 checks: every size from 0 to 300,000 around the group boundaries, every group size to 1024; results bit-identical on Metal and the CPU device |
+| `gpu/parallel` | `Reduce` (`.Sum .Min .Max`), `Scan` (inclusive, exclusive), `Sort` (stable radix; `uint32`, `int32`, `float32` keys in total order; optional `uint32` values), `TopK`, `Select`, `SelectIndices`, `Count` (with `Where`, exact for integers), `Gather`, `Scatter`, `ScatterAdd`, `Histogram`, `Iota`. Device functions `GroupSum`, `GroupMin`, `GroupMax`, `GroupScan`, `GroupExclusiveScan`, `GroupRank`, `GroupCount`. Each over `float32`, `int32` and `uint32` | 1434 checks: every size from 0 to 300,000 around the group boundaries, every group size to 1024; results bit-identical on Metal and the CPU device |
 | `gpu/random` | Philox4x32-10: `Key`, `Split`, `Fold`, `Block`, `Bits`, `Uint32`, `Uniform`, `Below`, `Bernoulli`; `Fill` for `float32` and `uint32` buffers | Random123's known answers; every device bit-identical to the host |
 | `gpu/gputest` | `Devices`, `Equal`, `Close` (ULPs), `Random`, `Sizes`, `Done` | the harness the others are tested with |
 

@@ -262,8 +262,223 @@ public func Scan(_ b: gpu.Buffer<{t}>, exclusive: bool = false) async throws {{
     return "".join(out)
 
 
+def select():
+    out = [HEADER, '''//
+// Select: the elements of a buffer that satisfy a condition, in the order
+// they came in -- stream compaction. Each element is tested into a flag,
+// the flags are scanned into where each kept element goes, and the kept
+// elements are written there.
+import "gpu"
+
+/// Where is the condition Select, SelectIndices and Count keep an element
+/// by: how it compares with a value. For integer elements the comparison
+/// is exact -- Less(0.5) keeps 0 and below, Less(-1) keeps no uint32 --
+/// and for float32 ones the value is rounded to float32 first.
+public enum Where {
+    case Less(float64)
+    case LessEqual(float64)
+    case Greater(float64)
+    case GreaterEqual(float64)
+    case Equal(float64)
+    case NotEqual(float64)
+
+    public var _code: int32 {
+        switch self {
+        case .Less: return 0
+        case .LessEqual: return 1
+        case .Greater: return 2
+        case .GreaterEqual: return 3
+        case .Equal: return 4
+        case .NotEqual: return 5
+        }
+    }
+
+    /// _bounds is the comparison for an integer type whose values run
+    /// from lo to hi: an operator and an integral value in that range, or
+    /// 6 (always) or 7 (never) where the value is outside it.
+    public func _bounds(_ lo: float64, _ hi: float64) -> (int32, float64) {
+        let v = _value
+        let up = v.rounded(.up)
+        let down = v.rounded(.down)
+        switch self {
+        case .Less:
+            return up <= lo ? (7, 0) : up > hi ? (6, 0) : (0, up)
+        case .LessEqual:
+            return down < lo ? (7, 0) : down >= hi ? (6, 0) : (1, down)
+        case .Greater:
+            return down < lo ? (6, 0) : down >= hi ? (7, 0) : (2, down)
+        case .GreaterEqual:
+            return up <= lo ? (6, 0) : up > hi ? (7, 0) : (3, up)
+        case .Equal:
+            return v != down || v < lo || v > hi ? (7, 0) : (4, v)
+        case .NotEqual:
+            return v != down || v < lo || v > hi ? (6, 0) : (5, v)
+        }
+    }
+
+    public var _value: float64 {
+        switch self {
+        case .Less(let v): return v
+        case .LessEqual(let v): return v
+        case .Greater(let v): return v
+        case .GreaterEqual(let v): return v
+        case .Equal(let v): return v
+        case .NotEqual(let v): return v
+        }
+    }
+}
+''']
+    bounds = {
+        "float32": "return (w._code, float32(w._value))",
+        "int32": "let (op, v) = w._bounds(-2147483648, 2147483647)\n    return (op, int32(v))",
+        "uint32": "let (op, v) = w._bounds(0, 4294967295)\n    return (op, uint32(v))",
+    }
+    for t, zero, maxv, minv, add in TYPES:
+        T = t[0].upper() + t[1:]
+        out.append(f'''
+@inlinable public func _test{T}(_ x: {t}, _ op: int32, _ v: {t}) -> bool {{
+    if op == 0 {{ return x < v }}
+    if op == 1 {{ return x <= v }}
+    if op == 2 {{ return x > v }}
+    if op == 3 {{ return x >= v }}
+    if op == 4 {{ return x == v }}
+    if op == 5 {{ return x != v }}
+    return op == 6
+}}
+
+func _flag{T}(_ x: gpu.Span<{t}>, _ flags: gpu.MutableSpan<uint32>, _ op: int32, _ v: {t}) kernel {{
+    let i = gpu.Index.x
+    if i < x.count {{
+        flags[i] = _test{T}(x[i], op, v) ? 1 : 0
+    }}
+}}
+
+func _compact{T}(_ x: gpu.Span<{t}>, _ at: gpu.Span<uint32>, _ out: gpu.MutableSpan<{t}>, _ indices: gpu.MutableSpan<uint32>, _ op: int32, _ v: {t}, _ values: bool) kernel {{
+    let i = gpu.Index.x
+    if i < x.count && _test{T}(x[i], op, v) {{
+        if values {{
+            out[int(at[i])] = x[i]
+        }} else {{
+            indices[int(at[i])] = uint32(i)
+        }}
+    }}
+}}
+
+/// _op{T} is w as an operator and a value of {t}.
+func _op{T}(_ w: Where) -> (int32, {t}) {{
+    {bounds[t]}
+}}
+
+/// _where{T} is where each kept element of b goes, and how many there are.
+func _where{T}(_ b: gpu.Buffer<{t}>, _ w: Where) async throws -> (gpu.Buffer<uint32>, int) {{
+    let flags = try await b.Device.CreateBuffer(of: uint32.self, count: b.count)
+    let (op, v) = _op{T}(w)
+    try await _flag{T}.Launch(b, flags, op, v, over: b.count)
+    let kept = int(try await Reduce(flags, .Sum))
+    try await Scan(flags, exclusive: true)
+    return (flags, kept)
+}}
+
+/// Count is how many elements of b satisfy w.
+public func Count(_ b: gpu.Buffer<{t}>, where w: Where) async throws -> int {{
+    if b.count == 0 {{ return 0 }}
+    let flags = try await b.Device.CreateBuffer(of: uint32.self, count: b.count)
+    let (op, v) = _op{T}(w)
+    try await _flag{T}.Launch(b, flags, op, v, over: b.count)
+    return int(try await Reduce(flags, .Sum))
+}}
+
+/// Select is the elements of b that satisfy w, in their order in b.
+public func Select(_ b: gpu.Buffer<{t}>, where w: Where) async throws -> gpu.Buffer<{t}> {{
+    if b.count == 0 {{ return try await b.Device.CreateBuffer(of: {t}.self, count: 0) }}
+    let (at, kept) = try await _where{T}(b, w)
+    let out = try await b.Device.CreateBuffer(of: {t}.self, count: kept)
+    if kept > 0 {{
+        let (op, v) = _op{T}(w)
+        try await _compact{T}.Launch(b, at, out, at, op, v, true, over: b.count)
+    }}
+    return out
+}}
+
+/// SelectIndices is where in b the elements that satisfy w are, in
+/// ascending order.
+public func SelectIndices(_ b: gpu.Buffer<{t}>, where w: Where) async throws -> gpu.Buffer<uint32> {{
+    if b.count == 0 {{ return try await b.Device.CreateBuffer(of: uint32.self, count: 0) }}
+    let (at, kept) = try await _where{T}(b, w)
+    let out = try await b.Device.CreateBuffer(of: uint32.self, count: kept)
+    if kept > 0 {{
+        let (op, v) = _op{T}(w)
+        try await _compact{T}.Launch(b, at, b, out, op, v, false, over: b.count)
+    }}
+    return out
+}}
+''')
+    return "".join(out)
+
+
+def gather():
+    out = [HEADER, '''//
+// Gather, Scatter and ScatterAdd: moving elements by an index buffer.
+// An index out of range traps, as every span access does.
+import "gpu"
+''']
+    for t, zero, maxv, minv, add in TYPES:
+        T = t[0].upper() + t[1:]
+        out.append(f'''
+func _gather{T}(_ src: gpu.Span<{t}>, _ indices: gpu.Span<uint32>, _ out: gpu.MutableSpan<{t}>) kernel {{
+    let i = gpu.Index.x
+    if i < indices.count {{
+        out[i] = src[int(indices[i])]
+    }}
+}}
+
+func _scatter{T}(_ src: gpu.Span<{t}>, _ indices: gpu.Span<uint32>, _ dst: gpu.MutableSpan<{t}>) kernel {{
+    let i = gpu.Index.x
+    if i < indices.count {{
+        dst[int(indices[i])] = src[i]
+    }}
+}}
+
+func _scatterAdd{T}(_ src: gpu.Span<{t}>, _ indices: gpu.Span<uint32>, _ dst: gpu.MutableSpan<{t}>) kernel {{
+    let i = gpu.Index.x
+    if i < indices.count {{
+        _ = gpu.Atomic.Add(dst.Address(int(indices[i])), src[i])
+    }}
+}}
+
+/// Gather is src at each of indices: out[i] = src[indices[i]].
+public func Gather(_ src: gpu.Buffer<{t}>, _ indices: gpu.Buffer<uint32>) async throws -> gpu.Buffer<{t}> {{
+    let out = try await src.Device.CreateBuffer(of: {t}.self, count: indices.count)
+    if indices.count > 0 {{
+        try await _gather{T}.Launch(src, indices, out, over: indices.count)
+    }}
+    return out
+}}
+
+/// Scatter writes each element of src to dst at its index: dst[indices[i]]
+/// = src[i]. Where two indices are the same, which write lands is not
+/// defined.
+public func Scatter(_ src: gpu.Buffer<{t}>, _ indices: gpu.Buffer<uint32>, into dst: gpu.Buffer<{t}>) async throws {{
+    if indices.count > 0 {{
+        try await _scatter{T}.Launch(src, indices, dst, over: indices.count)
+    }}
+}}
+
+/// ScatterAdd adds each element of src into dst at its index, atomically:
+/// dst[indices[i]] += src[i]. An integer sum is exact whatever the order; a
+/// float32 one is not deterministic, as the order of the additions is not.
+public func ScatterAdd(_ src: gpu.Buffer<{t}>, _ indices: gpu.Buffer<uint32>, into dst: gpu.Buffer<{t}>) async throws {{
+    if indices.count > 0 {{
+        try await _scatterAdd{T}.Launch(src, indices, dst, over: indices.count)
+    }}
+}}
+''')
+    return "".join(out)
+
+
 def main():
-    for name, text in [("group", group()), ("reduce", reduce()), ("scan", scan())]:
+    for name, text in [("group", group()), ("reduce", reduce()), ("scan", scan()),
+                       ("select", select()), ("gather", gather())]:
         with open(f"parallel/{name}.vs", "w") as f:
             f.write(text)
 

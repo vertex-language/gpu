@@ -100,17 +100,17 @@ public struct Key {
     return Uniform(key, i) < p
 }
 
-func _fillUniform(_ out: gpu.MutableSpan<float32>, _ lo: uint32, _ hi: uint32, _ start: uint) kernel {
+func _fillUniform(_ out: gpu.MutableSpan<float32>, _ lo: uint32, _ hi: uint32, _ start: uint64) kernel {
     let i = gpu.Index.x
     if i < out.count {
-        out[i] = Uniform(Key(lo: lo, hi: hi), uint64(start) + uint64(i))
+        out[i] = Uniform(Key(lo: lo, hi: hi), start + uint64(i))
     }
 }
 
-func _fillBits(_ out: gpu.MutableSpan<uint32>, _ lo: uint32, _ hi: uint32, _ start: uint) kernel {
+func _fillBits(_ out: gpu.MutableSpan<uint32>, _ lo: uint32, _ hi: uint32, _ start: uint64) kernel {
     let i = gpu.Index.x
     if i < out.count {
-        out[i] = Uint32(Key(lo: lo, hi: hi), uint64(start) + uint64(i))
+        out[i] = Uint32(Key(lo: lo, hi: hi), start + uint64(i))
     }
 }
 
@@ -118,12 +118,12 @@ func _fillBits(_ out: gpu.MutableSpan<uint32>, _ lo: uint32, _ hi: uint32, _ sta
 /// uniform float32s in [0, 1).
 public func Fill(_ b: gpu.Buffer<float32>, _ key: Key, start: uint64 = 0) async throws {
     if b.count == 0 { return }
-    try await _fillUniform.Launch(b, key.lo, key.hi, uint(start), over: b.count)
+    try await _fillUniform.Launch(b, key.lo, key.hi, start, over: b.count)
 }
 
 /// Fill writes elements start, start+1, ... of key's stream into b, as
 /// random words.
 public func Fill(_ b: gpu.Buffer<uint32>, _ key: Key, start: uint64 = 0) async throws {
     if b.count == 0 { return }
-    try await _fillBits.Launch(b, key.lo, key.hi, uint(start), over: b.count)
+    try await _fillBits.Launch(b, key.lo, key.hi, start, over: b.count)
 }

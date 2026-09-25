@@ -184,4 +184,122 @@ for n in gputest.Sizes {
     }
 }
 
+// ---- Count, Select, SelectIndices ----
+
+func keeps(_ x: float64, _ w: parallel.Where) -> bool {
+    switch w {
+    case .Less(let v): return x < v
+    case .LessEqual(let v): return x <= v
+    case .Greater(let v): return x > v
+    case .GreaterEqual(let v): return x >= v
+    case .Equal(let v): return x == v
+    case .NotEqual(let v): return x != v
+    }
+}
+
+for n in gputest.Sizes {
+    let fs = floats(n)
+    var xs: [int32] = []
+    for _ in 0..<n { xs.append(int32(bitPattern: rng.Uint32() % 21) - 10) }
+    let us = xs.map { uint32(bitPattern: $0 + 10) }
+    for w in [parallel.Where.Less(0.25), .GreaterEqual(-0.5), .Equal(3), .NotEqual(0), .LessEqual(-11), .Greater(1e12), .Equal(2.5)] {
+        var wantF: [float32] = [], wantI: [int32] = [], wantU: [uint32] = [], wantAt: [uint32] = []
+        for i in 0..<n {
+            if keeps(float64(fs[i]), w) { wantF.append(fs[i]) }
+            if keeps(float64(xs[i]), w) { wantI.append(xs[i]); wantAt.append(uint32(i)) }
+        }
+        wantU = us.filter { keeps(float64($0), w) }
+        for d in gputest.Devices() {
+            let fb = try await d.Upload(fs), ib = try await d.Upload(xs), ub = try await d.Upload(us)
+            gputest.Equal("Select f32 \(w)/\(n)", d, try await parallel.Select(fb, where: w).Download(), wantF)
+            gputest.Equal("Select i32 \(w)/\(n)", d, try await parallel.Select(ib, where: w).Download(), wantI)
+            gputest.Equal("Select u32 \(w)/\(n)", d, try await parallel.Select(ub, where: w).Download(), wantU)
+            gputest.Equal("SelectIndices i32 \(w)/\(n)", d, try await parallel.SelectIndices(ib, where: w).Download(), wantAt)
+            gputest.Equal("Count f32 \(w)/\(n)", d, [try await parallel.Count(fb, where: w)], [wantF.count])
+        }
+    }
+}
+
+// ---- Gather, Scatter, ScatterAdd ----
+
+for n in gputest.Sizes {
+    let fs = floats(n), xs = ints(n)
+    var picks: [uint32] = [], reverse: [uint32] = [], buckets: [uint32] = []
+    for i in 0..<n {
+        picks.append(rng.Uint32() % uint32(n))
+        reverse.append(uint32(n - 1 - i))
+        buckets.append(rng.Uint32() % 17)
+    }
+    var wantGather: [int32] = [], wantScatter = [float32](repeating: 0, count: n)
+    var wantAddI = [int32](repeating: 0, count: 17), wantAddF = [float64](repeating: 0, count: 17)
+    for i in 0..<n {
+        wantGather.append(xs[Int(picks[i])])
+        wantScatter[n - 1 - i] = fs[i]
+        wantAddI[Int(buckets[i])] = wantAddI[Int(buckets[i])] &+ xs[i]
+        wantAddF[Int(buckets[i])] += float64(fs[i])
+    }
+    for d in gputest.Devices() {
+        let fb = try await d.Upload(fs), ib = try await d.Upload(xs)
+        let pb = try await d.Upload(picks), rb = try await d.Upload(reverse), bb = try await d.Upload(buckets)
+        gputest.Equal("Gather i32/\(n)", d, try await parallel.Gather(ib, pb).Download(), wantGather)
+        let dst = try await d.CreateBuffer(of: float32.self, count: n)
+        try await parallel.Scatter(fb, rb, into: dst)
+        gputest.Equal("Scatter f32/\(n)", d, try await dst.Download(), wantScatter)
+        let sumsI = try await d.Upload([int32](repeating: 0, count: 17))
+        try await parallel.ScatterAdd(ib, bb, into: sumsI)
+        gputest.Equal("ScatterAdd i32/\(n)", d, try await sumsI.Download(), wantAddI)
+        let sumsF = try await d.Upload([float32](repeating: 0, count: 17))
+        try await parallel.ScatterAdd(fb, bb, into: sumsF)
+        gputest.Close("ScatterAdd f32/\(n)", d, try await sumsF.Download(), wantAddF.map { float32($0) }, ulps: 64 + n)
+    }
+}
+
+// ---- Histogram ----
+
+for n in gputest.Sizes {
+    for bins in [1, 10, 4096, 10000] {
+        var xs: [uint32] = []
+        var want = [uint32](repeating: 0, count: bins)
+        for _ in 0..<n {
+            let v = rng.Uint32() % uint32(bins + 3)
+            xs.append(v)
+            if v < uint32(bins) { want[Int(v)] += 1 }
+        }
+        for d in gputest.Devices() {
+            let b = try await d.Upload(xs)
+            gputest.Equal("Histogram \(bins)/\(n)", d, try await parallel.Histogram(b, bins: bins).Download(), want)
+        }
+    }
+}
+
+// ---- TopK ----
+
+// The host's top k: stable, largest first, ties to the earlier position.
+func hostTop(_ xs: [float32], _ k: int) -> [uint32] {
+    var top: [uint32] = []
+    for i in 0..<xs.count {
+        var at = top.count
+        while at > 0 && xs[Int(top[at - 1])] < xs[i] { at -= 1 }
+        if at < k {
+            top.insert(uint32(i), at: at)
+            if top.count > k { top.removeLast() }
+        }
+    }
+    return top
+}
+
+for n in gputest.Sizes {
+    var fs = floats(n)
+    for i in 0..<n { fs[i] = float32(int(fs[i] * 50)) }   // repeats, to see ties
+    for k in [1, 5, 32] {
+        let want = hostTop(fs, min(k, n))
+        for d in gputest.Devices() {
+            let b = try await d.Upload(fs)
+            let top = try await parallel.TopK(b, k: k)
+            gputest.Equal("TopK indices k=\(k)/\(n)", d, try await top.indices.Download(), want)
+            gputest.Equal("TopK values k=\(k)/\(n)", d, try await top.values.Download(), want.map { fs[Int($0)] })
+        }
+    }
+}
+
 gputest.Done()
