@@ -10,7 +10,8 @@
 // on every device that keeps subnormals. Head dimensions up to 128.
 //
 // Layouts are row-major: Q and O are [batch, heads, queries, d], K and V
-// [batch, kvHeads, keys, d]. heads a multiple of kvHeads is grouped-query
+// [batch, kvHeads, capacity, d], the first keys of each head's capacity
+// rows used -- a KV cache as it fills. heads a multiple of kvHeads is grouped-query
 // attention; kvHeads 1 is multi-query.
 import "gpu"
 import "gpu/parallel"
@@ -46,7 +47,7 @@ public enum Mask {
 }
 
 func _attend(_ q: gpu.Span<float32>, _ k: gpu.Span<float32>, _ v: gpu.Span<float32>, _ o: gpu.MutableSpan<float32>,
-             _ heads: int, _ kvHeads: int, _ queries: int, _ keys: int, _ d: int,
+             _ heads: int, _ kvHeads: int, _ queries: int, _ keys: int, _ capacity: int, _ d: int,
              _ scale: float32, _ causal: bool, _ window: int) kernel {
     let qs = gpu.Shared<float32>(count: 128)
     let ps = gpu.Shared<float32>(count: 128)
@@ -58,7 +59,7 @@ func _attend(_ q: gpu.Span<float32>, _ k: gpu.Span<float32>, _ v: gpu.Span<float
     let batch = bh / heads
     let kvHead = head / (heads / kvHeads)
     let qBase = row * d
-    let kvBase = (batch * kvHeads + kvHead) * keys * d
+    let kvBase = (batch * kvHeads + kvHead) * capacity * d
     let position = keys - queries + i     // the query's place among the keys
     if t < d {
         qs[t] = q[qBase + t]
@@ -125,7 +126,7 @@ public func Forward(q: gpu.Buffer<float32>, k: gpu.Buffer<float32>, v: gpu.Buffe
         return
     }
     let scale = shape.scale != 0 ? shape.scale : 1 / math.Sqrt(float32(shape.headDim))
-    try await _attend.Launch(q, k, v, o, shape.heads, shape.kvHeads, shape.queries, shape.keys, shape.headDim,
+    try await _attend.Launch(q, k, v, o, shape.heads, shape.kvHeads, shape.queries, shape.keys, shape.keyCapacity, shape.headDim,
                              scale, mask._causal, mask._window,
                              over: shape.batch * shape.heads * shape.queries * 128, workgroup: 128)
 }
@@ -133,6 +134,9 @@ public func Forward(q: gpu.Buffer<float32>, k: gpu.Buffer<float32>, v: gpu.Buffe
 /// Shape is an attention problem: batch, query heads, key/value heads
 /// (fewer for grouped-query attention), queries and keys per sequence,
 /// the head dimension, and the score scale (0 for 1/√headDim).
+/// keyCapacity is how many keys each head's rows of K and V have room
+/// for: a KV cache allocated for the whole context holds keys of them so
+/// far. 0 means keys, rows packed.
 public struct Shape {
     public var batch: int
     public var heads: int
@@ -141,8 +145,9 @@ public struct Shape {
     public var keys: int
     public var headDim: int
     public var scale: float32
+    public var keyCapacity: int
 
-    public init(batch: int = 1, heads: int, kvHeads: int = 0, queries: int, keys: int, headDim: int, scale: float32 = 0) {
+    public init(batch: int = 1, heads: int, kvHeads: int = 0, queries: int, keys: int, headDim: int, scale: float32 = 0, keyCapacity: int = 0) {
         self.batch = batch
         self.heads = heads
         self.kvHeads = kvHeads == 0 ? heads : kvHeads
@@ -150,5 +155,6 @@ public struct Shape {
         self.keys = keys
         self.headDim = headDim
         self.scale = scale
+        self.keyCapacity = keyCapacity == 0 ? keys : keyCapacity
     }
 }

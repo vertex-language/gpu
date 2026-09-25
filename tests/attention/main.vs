@@ -73,4 +73,33 @@ for (shape, window) in cases {
     }
 }
 
+// ---- a KV cache: keys in rows with room for more ----
+
+// The same K and V laid in a cache of capacity rows a head, the rows past
+// keys NaN: a read of one would show. Decoding a token is this, one query
+// and the keys so far.
+for (heads, kvHeads, keys, capacity, d) in [(6, 6, 1, 128, 48), (6, 6, 37, 128, 48), (8, 4, 20, 2048, 8), (8, 2, 64, 64, 16)] {
+    let shape = attention.Shape(heads: heads, kvHeads: kvHeads, queries: 1, keys: keys, headDim: d)
+    var q: [float32] = [], k: [float32] = [], v: [float32] = []
+    for _ in 0..<(heads * d) { q.append(rng.Float32() * 2) }
+    for _ in 0..<(kvHeads * keys * d) { k.append(rng.Float32() * 2); v.append(rng.Float32()) }
+    var kc = [float32](repeating: float32.nan, count: kvHeads * capacity * d), vc = kc
+    for h in 0..<kvHeads {
+        for j in 0..<(keys * d) {
+            kc[h * capacity * d + j] = k[h * keys * d + j]
+            vc[h * capacity * d + j] = v[h * keys * d + j]
+        }
+    }
+    var cached = shape
+    cached.keyCapacity = capacity
+    for d in gputest.Devices() {
+        let packed = try await d.CreateBuffer(of: float32.self, count: heads * shape.headDim)
+        let qb = try await d.Upload(q)
+        try await attention.Forward(q: qb, k: try await d.Upload(k), v: try await d.Upload(v), into: packed, shape, mask: .Causal)
+        let o = try await d.CreateBuffer(of: float32.self, count: heads * shape.headDim)
+        try await attention.Forward(q: qb, k: try await d.Upload(kc), v: try await d.Upload(vc), into: o, cached, mask: .Causal)
+        gputest.Equal("Forward from a cache h\(heads)/\(kvHeads) k\(keys) of \(capacity)", d, try await o.Download(), try await packed.Download())
+    }
+}
+
 gputest.Done()
