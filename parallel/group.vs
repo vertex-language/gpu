@@ -8,8 +8,10 @@
 // device for the same group size, floating-point sums included. That is
 // what lets the CPU device be their oracle bit for bit. A group holds at
 // most MaxGroup work-items.
-import "gpu"
-import "gpu/dtype"
+import (
+    "gpu"
+    "gpu/dtype"
+)
 
 /// MaxGroup is the most work-items a group-scope function supports.
 public let MaxGroup = 1024

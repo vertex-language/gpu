@@ -6,9 +6,11 @@
 // A row-wise op runs one workgroup per row, and every sum in it is taken
 // in a fixed order (gpu/parallel's group functions), so a result is the
 // same on every device that keeps subnormals.
-import "gpu"
-import "gpu/parallel"
-import "math"
+import (
+    "gpu"
+    "gpu/parallel"
+    "math"
+)
 
 /// RowGroup is how many work-items share one row of a row-wise op.
 public let RowGroup = 256
@@ -165,6 +167,8 @@ public enum Activation {
     case SiLU
     case Sigmoid
     case Tanh
+    case Exp
+    case Sin
 
     public var _code: int32 {
         switch self {
@@ -174,6 +178,8 @@ public enum Activation {
         case .SiLU: return 3
         case .Sigmoid: return 4
         case .Tanh: return 5
+        case .Exp: return 6
+        case .Sin: return 7
         }
     }
 }
@@ -188,6 +194,8 @@ public enum Activation {
     if a == 2 { return x * math.Sigmoid(1.5957691216 * (x + 0.044715 * x * x * x)) }
     if a == 3 { return x * math.Sigmoid(x) }
     if a == 4 { return math.Sigmoid(x) }
+    if a == 6 { return math.Exp(x) }
+    if a == 7 { return math.Sin(x) }
     return math.Tanh(x)
 }
 
@@ -206,7 +214,8 @@ func _gated(_ x: gpu.Span<float32>, _ gate: gpu.Span<float32>, _ y: gpu.MutableS
 }
 
 /// Activate writes a(x) into y, element by element: .ReLU, .GELU (with
-/// erf), .GELUTanh (the tanh approximation), .SiLU, .Sigmoid, .Tanh.
+/// erf), .GELUTanh (the tanh approximation), .SiLU, .Sigmoid, .Tanh, and
+/// .Exp and .Sin (a vocoder's magnitude and phase).
 public func Activate(_ x: gpu.Buffer<float32>, _ a: Activation, into y: gpu.Buffer<float32>) async throws {
     if x.count == 0 { return }
     try await _activate.Launch(x, y, a._code, over: x.count)
@@ -221,60 +230,76 @@ public func Gated(_ x: gpu.Buffer<float32>, gate: gpu.Buffer<float32>, _ a: Acti
 
 // ---- rotary position embeddings ----
 
-func _rope(_ x: gpu.MutableSpan<float32>, _ positions: gpu.Span<int32>, _ heads: int, _ dim: int, _ base: float32) kernel {
-    // One work-item a pair: token t, head h, pair p of (x[2p], x[2p+1])
-    // rotated by position · base^(-2p/dim).
+/// RopeLayout is which elements of a head RoPE turns together. It is a
+/// property of the weights: the rows of Q and K a checkpoint holds are laid
+/// out for one or the other.
+public enum RopeLayout: Equatable {
+    /// (x[2p], x[2p+1]): GPT-J's, and llama.cpp's for the llama GGUFs it
+    /// converts (it permutes Q and K for this).
+    case interleaved
+    /// (x[p], x[p + dim/2]): rotate_half, as Hugging Face's Llama, Qwen,
+    /// Gemma and Phi have it (NeoX's; llama.cpp's ROPE_TYPE_NEOX).
+    case halves
+
+    var code: int { return self == .halves ? 1 : 0 }
+}
+
+// ropeTurn rotates pair p of the head starting at head by angle position ·
+// base^(-2p/dim), in the layout halves says (0 interleaved, 1 halves).
+func ropeTurn(_ x: gpu.MutableSpan<float32>, _ head: int, _ p: int, _ dim: int, _ position: int, _ base: float32, _ halves: int) {
+    let freq = math.Exp2(-float32(2 * p) / float32(dim) * math.Log2(base))
+    let angle = float32(position) * freq
+    let c = math.Cos(angle)
+    let s = math.Sin(angle)
+    var ia = head + 2 * p
+    var ib = ia + 1
+    if halves != 0 {
+        ia = head + p
+        ib = ia + dim / 2
+    }
+    let a = x[ia]
+    let b = x[ib]
+    x[ia] = a * c - b * s
+    x[ib] = a * s + b * c
+}
+
+func _rope(_ x: gpu.MutableSpan<float32>, _ positions: gpu.Span<int32>, _ heads: int, _ dim: int, _ base: float32, _ halves: int) kernel {
+    // One work-item a pair: token t, head h, pair p.
     let i = gpu.Index.x
     let pairs = dim / 2
     let total = positions.count * heads * pairs
     if i >= total { return }
     let p = i % pairs
     let t = i / (heads * pairs)
-    let at = (i / pairs) * dim + 2 * p
-    let freq = math.Exp2(-float32(2 * p) / float32(dim) * math.Log2(base))
-    let angle = float32(positions[t]) * freq
-    let c = math.Cos(angle)
-    let s = math.Sin(angle)
-    let a = x[at]
-    let b = x[at + 1]
-    x[at] = a * c - b * s
-    x[at + 1] = a * s + b * c
+    ropeTurn(x, (i / pairs) * dim, p, dim, int(positions[t]), base, halves)
 }
 
-func _ropeAt(_ x: gpu.MutableSpan<float32>, _ position: int, _ heads: int, _ dim: int, _ base: float32) kernel {
+func _ropeAt(_ x: gpu.MutableSpan<float32>, _ position: int, _ heads: int, _ dim: int, _ base: float32, _ halves: int) kernel {
     // _rope for one token, its position a scalar: what decoding a token
     // needs, with no buffer for the host to write.
     let i = gpu.Index.x
     let pairs = dim / 2
     if i >= heads * pairs { return }
-    let p = i % pairs
-    let at = (i / pairs) * dim + 2 * p
-    let freq = math.Exp2(-float32(2 * p) / float32(dim) * math.Log2(base))
-    let angle = float32(position) * freq
-    let c = math.Cos(angle)
-    let s = math.Sin(angle)
-    let a = x[at]
-    let b = x[at + 1]
-    x[at] = a * c - b * s
-    x[at + 1] = a * s + b * c
+    ropeTurn(x, (i / pairs) * dim, i % pairs, dim, position, base, halves)
 }
 
 /// RoPE rotates one token's heads in place (heads x dim), all at position:
 /// RoPE(x, positions:) for a single token, the position passed as a value.
-public func RoPE(_ x: gpu.Buffer<float32>, position: int, heads: int, dim: int, base: float32 = 10000) async throws {
+public func RoPE(_ x: gpu.Buffer<float32>, position: int, heads: int, dim: int, base: float32 = 10000,
+                 layout: RopeLayout = .interleaved) async throws {
     let total = heads * (dim / 2)
     if total == 0 { return }
-    try await _ropeAt.Launch(x, position, heads, dim, base, over: total)
+    try await _ropeAt.Launch(x, position, heads, dim, base, layout.code, over: total)
 }
 
 /// RoPE rotates x in place (tokens x heads x dim, row-major, one position
-/// per token) by rotary position embeddings: each pair (x[2p], x[2p+1]) of
-/// a head turned by position · base^(-2p/dim). The interleaved (GPT-J)
-/// layout.
-public func RoPE(_ x: gpu.Buffer<float32>, positions: gpu.Buffer<int32>, heads: int, dim: int, base: float32 = 10000) async throws {
+/// per token) by rotary position embeddings: each pair p of a head turned
+/// by position · base^(-2p/dim), the pairs as layout says.
+public func RoPE(_ x: gpu.Buffer<float32>, positions: gpu.Buffer<int32>, heads: int, dim: int, base: float32 = 10000,
+                 layout: RopeLayout = .interleaved) async throws {
     let total = positions.count * heads * (dim / 2)
     if total == 0 { return }
-    try await _rope.Launch(x, positions, heads, dim, base, over: total)
+    try await _rope.Launch(x, positions, heads, dim, base, layout.code, over: total)
 }
 
 // ---- losses ----

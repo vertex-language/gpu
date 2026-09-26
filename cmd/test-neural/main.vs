@@ -1,8 +1,10 @@
 // gpu/neural on every device, against float64 references from the host's
 // libm, and against the CPU device.
-import "gpu"
-import "gpu/neural"
-import "gpu/gputest"
+import (
+    "gpu"
+    "gpu/gputest"
+    "gpu/neural"
+)
 
 @_silgen_name("exp") func cExp(_ x: float64) -> float64
 @_silgen_name("log") func cLog(_ x: float64) -> float64
@@ -113,13 +115,15 @@ func reference(_ a: neural.Activation, _ x: float64) -> float64 {
     case .SiLU: return x / (1 + cExp(-x))
     case .Sigmoid: return 1 / (1 + cExp(-x))
     case .Tanh: return cTanh(x)
+    case .Exp: return cExp(x)
+    case .Sin: return cSin(x)
     }
 }
 
 do {
     let x = matrix(50000, 8)
     let gate = matrix(50000, 8)
-    for (a, ulps) in [(neural.Activation.ReLU, 0), (.GELU, 8), (.GELUTanh, 8), (.SiLU, 8), (.Sigmoid, 4), (.Tanh, 4)] {
+    for (a, ulps) in [(neural.Activation.ReLU, 0), (.GELU, 8), (.GELUTanh, 8), (.SiLU, 8), (.Sigmoid, 4), (.Tanh, 4), (.Exp, 2), (.Sin, 3)] {
         let want = x.map { reference(a, float64($0)) }
         var gated: [float64] = []
         for i in 0..<x.count { gated.append(float64(x[i]) * reference(a, float64(gate[i]))) }
@@ -147,8 +151,8 @@ do {
     }
 }
 
-// RoPE, against the rotation done in float64.
-do {
+// RoPE in both layouts, against the rotation done in float64.
+for layout in [neural.RopeLayout.interleaved, neural.RopeLayout.halves] {
     let tokens = 9, heads = 3, dim = 16
     let x = matrix(tokens * heads * dim, 1)
     var positions: [int32] = []
@@ -157,25 +161,28 @@ do {
     for t in 0..<tokens {
         for h in 0..<heads {
             for p in 0..<(dim / 2) {
-                let at = (t * heads + h) * dim + 2 * p
+                let head = (t * heads + h) * dim
+                let ia = layout == .halves ? head + p : head + 2 * p
+                let ib = layout == .halves ? ia + dim / 2 : ia + 1
                 let angle = float64(positions[t]) * cPow(10000, -float64(2 * p) / float64(dim))
-                let a = want[at], b = want[at + 1]
-                want[at] = a * cCos(angle) - b * cSin(angle)
-                want[at + 1] = a * cSin(angle) + b * cCos(angle)
+                let a = want[ia], b = want[ib]
+                want[ia] = a * cCos(angle) - b * cSin(angle)
+                want[ib] = a * cSin(angle) + b * cCos(angle)
             }
         }
     }
+    let name = layout == .halves ? "RoPE halves" : "RoPE interleaved"
     var got: [(gpu.Device, [float32])] = []
     for d in gputest.Devices() {
         let xb = try await d.Upload(x)
-        try await neural.RoPE(xb, positions: try await d.Upload(positions), heads: heads, dim: dim)
+        try await neural.RoPE(xb, positions: try await d.Upload(positions), heads: heads, dim: dim, layout: layout)
         got.append((d, try await xb.Download()))
     }
     // The angle is position · frequency in float32, so its error grows with
     // the position: an absolute bound, as a model's own float32 RoPE has.
     for (d, g) in got {
-        gputest.Near("RoPE", d, g, want, bound: want.map { _ in 2e-4 })
-        if !d.IsCPU { gputest.Close("RoPE vs cpu", d, g, got[0].1, ulps: 1) }
+        gputest.Near(name, d, g, want, bound: want.map { _ in 2e-4 })
+        if !d.IsCPU { gputest.Close(name + " vs cpu", d, g, got[0].1, ulps: 1) }
     }
     // One token at a time, its position a value: the same bits as the
     // buffer of positions gives.
@@ -183,10 +190,10 @@ do {
         var each: [float32] = []
         for t in 0..<tokens {
             let xb = try await d.Upload(Array(x[(t * heads * dim)..<((t + 1) * heads * dim)]))
-            try await neural.RoPE(xb, position: int(positions[t]), heads: heads, dim: dim)
+            try await neural.RoPE(xb, position: int(positions[t]), heads: heads, dim: dim, layout: layout)
             each += try await xb.Download()
         }
-        gputest.Equal("RoPE a token at a position", d, each, g)
+        gputest.Equal(name + " a token at a position", d, each, g)
     }
 }
 

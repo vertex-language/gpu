@@ -1,8 +1,10 @@
 // Reduce: a buffer to one value, a workgroup at a time, then the groups'
 // results the same way, until one is left. The order is fixed by the
 // count, so the result is the same on every device.
-import "gpu"
-import "gpu/dtype"
+import (
+    "gpu"
+    "gpu/dtype"
+)
 
 /// Reduction is what Reduce combines elements with.
 public enum Reduction {

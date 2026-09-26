@@ -1,8 +1,10 @@
 // gpu/random: Philox against its published answers, and every device
 // against the host bit for bit.
-import "gpu"
-import "gpu/random"
-import "gpu/gputest"
+import (
+    "gpu"
+    "gpu/gputest"
+    "gpu/random"
+)
 
 let host = gputest.Devices()[0]
 

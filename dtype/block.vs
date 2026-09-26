@@ -93,6 +93,54 @@ public struct Q8_0: Block {
     }
 }
 
+/// F16 is IEEE half floats as a Block: 16 of them, 32 bytes, no scale --
+/// so that a float16 weight (safetensors' F16, GGUF's type 1) runs through
+/// the same Gemv and Dequantize as the quantized ones.
+public struct F16: Block {
+    public init() {}
+    @inlinable public static func GGMLType() -> int { return 1 }
+    @inlinable public static func Size() -> int { return 16 }
+    @inlinable public static func Bytes() -> int { return 32 }
+    @inlinable public static func Decode(_ b: gpu.Span<uint8>, _ at: int, _ j: int) -> float32 {
+        let o = at + 2 * j
+        return float32(float16(bitPattern: uint16(b[o]) | uint16(b[o + 1]) << 8))
+    }
+    @inlinable public static func Dot(_ block: UnsafeMutablePointer<uint8>, _ v: UnsafeMutablePointer<float32>) -> float32 {
+        let h = UnsafePointer<uint16>(UnsafeRawPointer(block))
+        var s: float32 = 0
+        var j = 0
+        while j < 16 {
+            s = s + float32(float16(bitPattern: h[j])) * v[j]
+            j = j &+ 1
+        }
+        return s
+    }
+}
+
+/// BF16 is bfloat16 as a Block: the high half of a float32, 16 of them in
+/// 32 bytes -- the dtype most checkpoints on the Hugging Face Hub hold.
+/// Widening is exact.
+public struct BF16: Block {
+    public init() {}
+    @inlinable public static func GGMLType() -> int { return 30 }
+    @inlinable public static func Size() -> int { return 16 }
+    @inlinable public static func Bytes() -> int { return 32 }
+    @inlinable public static func Decode(_ b: gpu.Span<uint8>, _ at: int, _ j: int) -> float32 {
+        let o = at + 2 * j
+        return float32(bitPattern: (uint32(b[o]) | uint32(b[o + 1]) << 8) << 16)
+    }
+    @inlinable public static func Dot(_ block: UnsafeMutablePointer<uint8>, _ v: UnsafeMutablePointer<float32>) -> float32 {
+        let h = UnsafePointer<uint16>(UnsafeRawPointer(block))
+        var s: float32 = 0
+        var j = 0
+        while j < 16 {
+            s = s + float32(bitPattern: uint32(h[j]) << 16) * v[j]
+            j = j &+ 1
+        }
+        return s
+    }
+}
+
 /// _scaleMinK4 is the 6-bit scale and min of sub-block j (0 to 7) of a
 /// k-quant block, packed in its 12 scale bytes (ggml's get_scale_min_k4).
 @inlinable public func _scaleMinK4(_ j: int, _ q: UnsafeMutablePointer<uint8>) -> (int32, int32) {

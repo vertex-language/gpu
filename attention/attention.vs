@@ -13,9 +13,11 @@
 // [batch, kvHeads, capacity, d], the first keys of each head's capacity
 // rows used -- a KV cache as it fills. heads a multiple of kvHeads is grouped-query
 // attention; kvHeads 1 is multi-query.
-import "gpu"
-import "gpu/parallel"
-import "math"
+import (
+    "gpu"
+    "gpu/parallel"
+    "math"
+)
 
 /// MaxHeadDim is the largest head dimension Forward takes.
 public let MaxHeadDim = 128

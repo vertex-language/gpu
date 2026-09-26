@@ -1,7 +1,9 @@
 // Gather, Scatter and ScatterAdd: moving elements by an index buffer.
 // An index out of range traps, as every span access does.
-import "gpu"
-import "gpu/dtype"
+import (
+    "gpu"
+    "gpu/dtype"
+)
 
 @inlinable public func _gather<T: dtype.Number>(_ src: gpu.Span<T>, _ indices: gpu.Span<uint32>, _ out: gpu.MutableSpan<T>) kernel {
     let i = gpu.Index.x

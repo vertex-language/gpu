@@ -14,16 +14,13 @@ Accelerated compute library: sorts, scans, matrix multiplies, FFTs, random strea
 | `gpu/dtype` | `Number`: the protocol kernels compute with (`float32`, `float16`, `bfloat16`, `int32`, `uint32`), with the identities, wrapping sum, order key, atomic add and `Accumulator` (`float32` for a half; `Widen`, `Narrow`) the other packages need. `Block`: ggml's block-quantized formats as tag types (`Q4_0`, `Q8_0`), read in place from a GGUF tensor's bytes, with exact device `Decode` and `Dot`; `Dequantize` | through every package above it; block decoding bit-identical to ggml's `dequantize_row` on every device, on random blocks and on every tensor of a Q4_0 llama (`model`'s `test-quant`) |
 | `gpu/parallel` | Generic over `dtype.Number`, one definition each: `Reduce` (`.Sum .Min .Max`), `Scan` (inclusive, exclusive), `Sort` (stable radix in total order; optional `uint32` values), `TopK`, `Select`, `SelectIndices`, `Count` (with `Where`, exact for integers), `Gather`, `Scatter`, `ScatterAdd`, `Histogram`, `Iota`. Device functions `GroupSum`, `GroupMin`, `GroupMax`, `GroupScan`, `GroupExclusiveScan`, `GroupRank`, `GroupCount` | 1638 checks, at `float32`, `float16`, `bfloat16`, `int32` and `uint32`: every size from 0 to 300,000 around the group boundaries, every group size to 1024; results bit-identical on Metal and the CPU device |
 | `gpu/linalg` | `Matmul` over a `Shape` (m, n, k, batch, transposes) with an optional fused `Epilogue` (scale, bias, residual, `.ReLU`), tiled through shared storage; `Gemv`, and `Gemv` of block-quantized weights (`dtype.Q4_0`, `dtype.Q8_0`: a kernel specialized per format, decoding in place; a row a segment of a wave, reduced by shuffles, no barriers); every Gemv can `accumulate` into y (a residual in the same pass); `Transpose`. Generic over `dtype.Number`; sums and the epilogue in its `Accumulator`, so a half matmul stores halves and adds in `float32` | 315 checks: odd shapes, batches, transposes and the epilogue; `int32` exactly, `float32` within k·ε·Σ\|a·b\| of an `f64` host product, `float16` and `bfloat16` within that plus one rounding to the half; quantized Gemv within the `float32` bound of an `f64` product of the decoded weights |
-| `gpu/neural` | `Softmax`, `LogSoftmax`, `LogSumExp`, `RMSNorm`, `LayerNorm` (a workgroup a row, fixed-order sums), `Activate` and `Gated` (`.ReLU .GELU .GELUTanh .SiLU .Sigmoid .Tanh`, cancellation-free in the tails), `RoPE` (a buffer of positions, or one token's position as a value), `CrossEntropy`; float32, over the `math` package | 129 checks against float64 libm references within bounds derived from the inputs; every device bit-identical to the CPU device |
+| `gpu/neural` | `Softmax`, `LogSoftmax`, `LogSumExp`, `RMSNorm`, `LayerNorm` (a workgroup a row, fixed-order sums), `Activate` and `Gated` (`.ReLU .GELU .GELUTanh .SiLU .Sigmoid .Tanh .Exp .Sin`, cancellation-free in the tails), `RoPE` (a buffer of positions, or one token's position as a value), `CrossEntropy`. For audio networks over [channels, length]: `Conv1d` and `ConvTranspose1d` (`Conv1dShape`: stride, padding, dilation, groups), `WeightNorm`, `Pad` (zeros or reflected), `Upsample` (nearest and linear, PyTorch's scale-factor rules, bit for bit), `InstanceNorm`, `ChannelNorm`, `Modulate`, `LeakyReLU`, `Snake`, `Axpby`, `CumSum`, `LSTMCell`, `STFT` and `ISTFT` (direct DFT for short windows), `SplitHeads`/`MergeHeads` and `GatherColumns`. Float32, over the `math` package | 148 checks (the audio kernels are checked against torch by `nn`'s `test-layers`) against float64 libm references within bounds derived from the inputs; every device bit-identical to the CPU device |
 | `gpu/attention` | `Forward`: FlashAttention's online softmax over key blocks (no scores matrix), a workgroup per query row; `Mask` `.None`, `.Causal` (with a KV-cache offset), `.SlidingWindow(n)`; grouped- and multi-query heads through `Shape`; head dims to 128; float32 | 62 checks against float64 attention on the host; every device bit-identical to the CPU device; from a KV cache (`Shape.keyCapacity`: rows with room for more keys), bit-identical to the packed layout |
 | `gpu/random` | Philox4x32-10: `Key`, `Split`, `Fold`, `Block`, `Bits`, `Uint32`, `Uniform`, `Normal` (Box–Muller), `Below`, `Bernoulli`; `Fill` for `float32` and `uint32` buffers, `FillNormal` | Random123's known answers; every device bit-identical to the host; `Normal`'s moments |
 | `gpu/gputest` | `Devices`, `Equal`, `Close` (ULPs), `Near` (an absolute bound per element), `Random`, `Sizes`, `Done` | the harness the others are tested with |
 
 ```bash
-# Run any entry point
-vsc run main.vs
-
-# Run the test suites
+# Run the test suites in cmd/
 vsc run test-parallel
 vsc run test-linalg
 vsc run test-neural
@@ -77,8 +74,10 @@ operation launches one or more kernels and returns when the result is
 ready:
 
 ```vertex
-import "gpu"
-import "gpu/parallel"
+import (
+    "gpu"
+    "gpu/parallel"
+)
 
 let d = gpu.Default()
 let keys = try await d.Upload(depths)          // [float32]
@@ -95,8 +94,10 @@ where you call it. This is CUB's block and warp layer, and Metal's
 simdgroup functions, made into a shared library:
 
 ```vertex
-import "gpu"
-import "gpu/parallel"
+import (
+    "gpu"
+    "gpu/parallel"
+)
 
 // One workgroup per row: scale each row to unit length.
 func normalizeRows(_ x: gpu.MutableSpan<float32>, _ cols: int) kernel {

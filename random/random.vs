@@ -8,8 +8,10 @@
 // Keys follow JAX: a Key is made from a seed and split into independent
 // keys rather than advanced, so that no two users of randomness ever
 // share a stream by accident.
-import "gpu"
-import "math"
+import (
+    "gpu"
+    "math"
+)
 
 /// Key names one stream of random numbers. It is two words, a plain
 /// value, so a kernel can take one (as its two words) and make it again.

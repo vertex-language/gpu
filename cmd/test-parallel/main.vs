@@ -1,8 +1,10 @@
 // gpu/parallel on every device, against the host and the CPU device.
-import "gpu"
-import "gpu/parallel"
-import "gpu/dtype"
-import "gpu/gputest"
+import (
+    "gpu"
+    "gpu/dtype"
+    "gpu/gputest"
+    "gpu/parallel"
+)
 
 var rng = gputest.Random(seed: 1)
 

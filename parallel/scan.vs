@@ -3,8 +3,10 @@
 // same way) into each group's offset; the offsets are added in. The order
 // of every addition is fixed by the count, so the result is the same on
 // every device.
-import "gpu"
-import "gpu/dtype"
+import (
+    "gpu"
+    "gpu/dtype"
+)
 
 @inlinable public func _scanBlocks<T: dtype.Number>(_ x: gpu.MutableSpan<T>, _ sums: gpu.MutableSpan<T>, _ n: int, _ exclusive: bool) kernel {
     let i = gpu.Index.x

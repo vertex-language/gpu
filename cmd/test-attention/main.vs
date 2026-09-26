@@ -1,8 +1,10 @@
 // gpu/attention against attention computed on the host in float64: the
 // scores, the softmax and the weighted sum written out plainly.
-import "gpu"
-import "gpu/attention"
-import "gpu/gputest"
+import (
+    "gpu"
+    "gpu/attention"
+    "gpu/gputest"
+)
 
 @_silgen_name("exp") func cExp(_ x: float64) -> float64
 

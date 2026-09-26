@@ -8,9 +8,11 @@
 // only where a device fuses them. The sum is taken in the type's
 // dtype.Number.Accumulator -- float32 for a half, as every half GEMM
 // does -- and the epilogue too, so C is rounded once, at the end.
-import "gpu"
-import "gpu/dtype"
-import "gpu/parallel"
+import (
+    "gpu"
+    "gpu/dtype"
+    "gpu/parallel"
+)
 
 /// Activation is applied to each element of a Matmul's result, after
 /// scale, bias and residual. GELU and SiLU wait on math inside kernels.

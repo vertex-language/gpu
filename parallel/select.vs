@@ -2,8 +2,10 @@
 // they came in -- stream compaction. Each element is tested into a flag,
 // the flags are scanned into where each kept element goes, and the kept
 // elements are written there.
-import "gpu"
-import "gpu/dtype"
+import (
+    "gpu"
+    "gpu/dtype"
+)
 
 /// Where is the condition Select, SelectIndices and Count keep an element
 /// by: how it compares with a value. For integer elements the comparison

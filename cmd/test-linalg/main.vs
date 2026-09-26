@@ -1,9 +1,11 @@
 // gpu/linalg on every device: int32 exactly against the host; float32
 // against an f64 host product within ULPs, and against the CPU device.
-import "gpu"
-import "gpu/linalg"
-import "gpu/dtype"
-import "gpu/gputest"
+import (
+    "gpu"
+    "gpu/dtype"
+    "gpu/gputest"
+    "gpu/linalg"
+)
 
 var rng = gputest.Random(seed: 3)
 
@@ -301,6 +303,53 @@ func kquant<B: dtype.Block>(_ name: string, _ format: B, _ scaleAt: [int]) async
 
 try await kquant("q4_K", dtype.Q4_K(), [0, 2])
 try await kquant("q6_K", dtype.Q6_K(), [208])
+
+// ---- float16 and bfloat16 weights, as Blocks ----
+
+// Random halves in [-1, 1]; decode against the host's own widening, Gemv
+// against float64.
+func halves<B: dtype.Block>(_ name: string, _ format: B, _ bf16: bool) async throws {
+    for (m, k) in [(1, 16), (5, 48), (288, 288), (100, 4096)] {
+        var w: [uint8] = []
+        var dense: [float32] = []
+        for _ in 0..<(m * k) {
+            let v = rng.Float32() * 2 - 1
+            var bits: uint16 = 0
+            if bf16 {
+                bits = uint16(v.bitPattern >> 16)
+                dense.append(float32(bitPattern: uint32(bits) << 16))
+            } else {
+                bits = float16(v).bitPattern
+                dense.append(float32(float16(bitPattern: bits)))
+            }
+            w.append(uint8(truncatingIfNeeded: bits))
+            w.append(uint8(truncatingIfNeeded: bits >> 8))
+        }
+        let x = (0..<k).map { _ in rng.Float32() * 2 - 1 }
+        var want: [float64] = [], bound: [float64] = []
+        for r in 0..<m {
+            var s: float64 = 0, a: float64 = 0
+            for c in 0..<k {
+                s += float64(dense[r * k + c]) * float64(x[c])
+                a += (float64(dense[r * k + c]) * float64(x[c])).magnitude
+            }
+            want.append(s)
+            bound.append(a * float64(k + 16) * 5.960464477539063e-08 + 1e-30)
+        }
+        for d in gputest.Devices() {
+            let wb = try await d.Upload(w)
+            let deq = try await d.CreateBuffer(of: float32.self, count: m * k)
+            try await dtype.Dequantize(wb, format, count: m * k, into: deq)
+            gputest.Equal("Dequantize \(name) \(m)x\(k)", d, try await deq.Download(), dense)
+            let y = try await d.CreateBuffer(of: float32.self, count: m)
+            try await linalg.Gemv(wb, format, try await d.Upload(x), into: y, m: m, k: k)
+            gputest.Near("Gemv \(name) \(m)x\(k)", d, try await y.Download(), want, bound: bound)
+        }
+    }
+}
+
+try await halves("f16", dtype.F16(), false)
+try await halves("bf16", dtype.BF16(), true)
 
 try await quantized("q4_0", dtype.Q4_0(), false)
 try await quantized("q8_0", dtype.Q8_0(), true)

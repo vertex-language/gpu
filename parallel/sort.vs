@@ -10,8 +10,10 @@
 //
 // Any Number is sorted as the uint32s whose order is its order
 // (dtype.Number.OrderKey): for a float, IEEE 754's total order.
-import "gpu"
-import "gpu/dtype"
+import (
+    "gpu"
+    "gpu/dtype"
+)
 
 func _radixCount(_ keys: gpu.Span<uint32>, _ counts: gpu.MutableSpan<uint32>, _ n: int, _ shift: uint32, _ groups: int) kernel {
     let hist = gpu.Shared<uint32>(count: 16)
