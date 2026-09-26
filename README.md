@@ -294,7 +294,7 @@ Display P3, BT.709/2020, YUV planar and semi-planar), `Blur`, `Convolve2D`,
 `Normalize` (vision-model preprocessing), and BCn/ASTC `Encode` and
 `Decode`. Operations take `layout.View`s of pixels. Sampler and texture
 objects stay in the built-in `gpu`. Users: `media` decode pipelines, 3D
-asset loading, `model` vision preprocessing, and a future GPU `ui/draw`.
+asset loading, `model` vision preprocessing, and a future GPU `image/draw`.
 
 ### `gpu/spatial`
 
@@ -337,7 +337,7 @@ rasterizer everywhere else, including headless machines and Linux on CUDA
 and HIP. Both write a **visibility buffer** of 64-bit depth and triangle
 ids, merged with `gpu.Atomic.Min`, so everything after "which triangle
 covers this pixel" is shared compute. The compute path doubles as the
-oracle for the hardware path. `ui/draw`'s GPU backend and differentiable
+oracle for the hardware path. `image/draw`'s GPU backend and differentiable
 rendering reuse it.
 
 ### `gpu/profile`
