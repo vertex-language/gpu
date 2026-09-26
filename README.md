@@ -409,7 +409,7 @@ and are never linked into anything that ships.
 ```
 gpu/
 ├── README.md
-├── package.vs
+├── vs.mod
 ├── internal/dispatch/     image tables, shape buckets, tuning cache
 ├── dtype/  layout/
 ├── parallel/              *.vs            (+ cuda/, hip/, metal/ only where profiling earns it)
@@ -417,7 +417,7 @@ gpu/
 ├── sparse/  fft/  random/  image/  spatial/
 ├── neural/  attention/    *.vs  cuda/ hip/ metal/
 ├── raster/  profile/  gputest/
-└── tests/                 one ladder per package, run on every device and the CPU
+└── cmd/test-*/           one ladder per package, run on every device and the CPU
 ```
 
 ## What does not belong here
