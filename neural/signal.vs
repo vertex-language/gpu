@@ -242,8 +242,8 @@ func twiddles(_ n: int) -> [float32] {
             s = q == 1 ? 1 : (q == 3 ? -1 : 0)
         } else {
             let a = 2 * 3.14159265358979323846 * float64(m) / float64(n)
-            c = cos64(a)
-            s = cos64(a - 3.14159265358979323846 / 2)
+            c = math.Cos(a)
+            s = math.Cos(a - 3.14159265358979323846 / 2)
         }
         out[m] = float32(c)
         out[n + m] = float32(s)
@@ -251,31 +251,11 @@ func twiddles(_ n: int) -> [float32] {
     return out
 }
 
-// cos64 is the cosine in double, for the host's tables: the angle
-// reduced to [-π, π], then the Taylor series, which there is good to
-// 1e-15 -- far past the float32 the tables are kept in.
-func cos64(_ x: float64) -> float64 {
-    let twoPi = 6.28318530717958647692
-    var a = x - twoPi * (x / twoPi).rounded(.toNearestOrEven)
-    if a > 3.14159265358979323846 { a -= twoPi }
-    if a < -3.14159265358979323846 { a += twoPi }
-    let z = a * a
-    var term = 1.0
-    var sum = 1.0
-    var k = 1.0
-    while k < 40 {
-        term = -term * z / (k * (k + 1))
-        sum += term
-        k += 2
-    }
-    return sum
-}
-
 /// HannWindow is torch.hann_window(n) (periodic): 0.5 - 0.5·cos(2πk/n).
 public func HannWindow(_ n: int) -> [float32] {
     var w = [float32](repeating: 0, count: n)
     for k in 0..<n {
-        w[k] = float32(0.5 - 0.5 * cos64(2 * 3.14159265358979323846 * float64(k) / float64(n)))
+        w[k] = float32(0.5 - 0.5 * math.Cos(2 * 3.14159265358979323846 * float64(k) / float64(n)))
     }
     return w
 }
