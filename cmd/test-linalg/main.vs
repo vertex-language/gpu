@@ -1,0 +1,357 @@
+// gpu/linalg on every device: int32 exactly against the host; float32
+// against an f64 host product within ULPs, and against the CPU device.
+import (
+    "gpu"
+    "gpu/dtype"
+    "gpu/gputest"
+    "gpu/linalg"
+)
+
+var rng = gputest.Random(seed: 3)
+
+func hostMatmul(_ a: [float64], _ b: [float64], _ m: int, _ n: int, _ k: int, _ ta: bool, _ tb: bool) -> [float64] {
+    return hostProducts(a, b, m, n, k, ta, tb, false)
+}
+
+// hostProducts is A·B, or with abs, Σ|a·b| for each element: what bounds
+// a float32 dot product's error.
+func hostProducts(_ a: [float64], _ b: [float64], _ m: int, _ n: int, _ k: int, _ ta: bool, _ tb: bool, _ abs: bool) -> [float64] {
+    var c = [float64](repeating: 0, count: m * n)
+    for i in 0..<m {
+        for j in 0..<n {
+            var s: float64 = 0
+            for p in 0..<k {
+                let x = ta ? a[p * m + i] : a[i * k + p]
+                let y = tb ? b[j * k + p] : b[p * n + j]
+                s += abs ? (x * y).magnitude : x * y
+            }
+            c[i * n + j] = s
+        }
+    }
+    return c
+}
+
+let shapes = [(1, 1, 1), (3, 5, 7), (16, 16, 16), (17, 33, 65), (64, 48, 80), (100, 1, 50), (1, 100, 3)]
+for (m, n, k) in shapes {
+    for (ta, tb) in [(false, false), (true, false), (false, true)] {
+        let batch = m * n * k < 5000 ? 3 : 1
+        var af: [float32] = [], bf: [float32] = [], ai: [int32] = [], bi: [int32] = []
+        for _ in 0..<(batch * m * k) { af.append(rng.Float32()); ai.append(int32(rng.Uint32() % 11) - 5) }
+        for _ in 0..<(batch * k * n) { bf.append(rng.Float32()); bi.append(int32(rng.Uint32() % 11) - 5) }
+        var wantF: [float64] = [], boundF: [float64] = [], wantI: [int32] = []
+        for bt in 0..<batch {
+            let pa = Array(af[(bt * m * k)..<((bt + 1) * m * k)]).map { float64($0) }
+            let pb = Array(bf[(bt * k * n)..<((bt + 1) * k * n)]).map { float64($0) }
+            wantF += hostMatmul(pa, pb, m, n, k, ta, tb)
+            // k roundings of a sum of k products, each at most half an ulp
+            // of what it rounds: (k + 1)·2^-24·Σ|a·b|, and a little more.
+            boundF += hostProducts(pa, pb, m, n, k, ta, tb, true).map { $0 * float64(k + 2) * 5.960464477539063e-08 + 1e-30 }
+            let qa = Array(ai[(bt * m * k)..<((bt + 1) * m * k)]).map { float64($0) }
+            let qb = Array(bi[(bt * k * n)..<((bt + 1) * k * n)]).map { float64($0) }
+            wantI += hostMatmul(qa, qb, m, n, k, ta, tb).map { int32($0) }
+        }
+        let what = "\(m)x\(n)x\(k) b\(batch) t\(ta ? 1 : 0)\(tb ? 1 : 0)"
+        var oracle: [float32] = []
+        for d in gputest.Devices() {
+            let a = try await d.Upload(af), b = try await d.Upload(bf)
+            let c = try await d.CreateBuffer(of: float32.self, count: batch * m * n)
+            let shape = linalg.Shape(m: m, n: n, k: k, batch: batch, transposeA: ta, transposeB: tb)
+            try await linalg.Matmul(a, b, into: c, shape)
+            let got = try await c.Download()
+            gputest.Near("Matmul f32 \(what)", d, got, wantF, bound: boundF)
+            if d.IsCPU { oracle = got } else { gputest.Close("Matmul f32 \(what) vs cpu", d, got, oracle, ulps: 4 * k + 4) }
+            let x = try await d.Upload(ai), y = try await d.Upload(bi)
+            let z = try await d.CreateBuffer(of: int32.self, count: batch * m * n)
+            try await linalg.Matmul(x, y, into: z, shape)
+            gputest.Equal("Matmul i32 \(what)", d, try await z.Download(), wantI)
+        }
+    }
+}
+
+// The epilogue: relu(2 * A·B + bias[col] + residual), in int32 exactly.
+do {
+    let m = 5, n = 7, k = 9
+    var a: [int32] = [], b: [int32] = [], bias: [int32] = [], res: [int32] = []
+    for _ in 0..<(m * k) { a.append(int32(rng.Uint32() % 7) - 3) }
+    for _ in 0..<(k * n) { b.append(int32(rng.Uint32() % 7) - 3) }
+    for _ in 0..<n { bias.append(int32(rng.Uint32() % 9) - 4) }
+    for _ in 0..<(m * n) { res.append(int32(rng.Uint32() % 9) - 4) }
+    let p = hostMatmul(a.map { float64($0) }, b.map { float64($0) }, m, n, k, false, false)
+    var want: [int32] = []
+    for i in 0..<m { for j in 0..<n { want.append(max(0, 2 * int32(p[i * n + j]) + bias[j] + res[i * n + j])) } }
+    for d in gputest.Devices() {
+        let c = try await d.CreateBuffer(of: int32.self, count: m * n)
+        let e = linalg.Epilogue<int32>(scale: 2, bias: try await d.Upload(bias), residual: try await d.Upload(res), activation: .ReLU)
+        try await linalg.Matmul(try await d.Upload(a), try await d.Upload(b), into: c, linalg.Shape(m: m, n: n, k: k), e)
+        gputest.Equal("Matmul epilogue", d, try await c.Download(), want)
+    }
+}
+
+// Gemv and Transpose.
+for (m, k) in [(1, 1), (7, 3), (64, 256), (300, 1000), (5, 4097)] {
+    var a: [int32] = [], x: [int32] = []
+    for _ in 0..<(m * k) { a.append(int32(rng.Uint32() % 9) - 4) }
+    for _ in 0..<k { x.append(int32(rng.Uint32() % 9) - 4) }
+    var want: [int32] = []
+    for i in 0..<m { var s: int32 = 0; for j in 0..<k { s += a[i * k + j] * x[j] }; want.append(s) }
+    var wantT = [int32](repeating: 0, count: m * k)
+    for i in 0..<m { for j in 0..<k { wantT[j * m + i] = a[i * k + j] } }
+    for d in gputest.Devices() {
+        let ab = try await d.Upload(a)
+        let y = try await d.CreateBuffer(of: int32.self, count: m)
+        try await linalg.Gemv(ab, try await d.Upload(x), into: y, m: m, k: k)
+        gputest.Equal("Gemv \(m)x\(k)", d, try await y.Download(), want)
+        let t = try await d.CreateBuffer(of: int32.self, count: m * k)
+        try await linalg.Transpose(ab, into: t, rows: m, cols: k)
+        gputest.Equal("Transpose \(m)x\(k)", d, try await t.Download(), wantT)
+    }
+}
+
+// ---- float16 and bfloat16 ----
+
+// Halves in, halves out, the sum taken in float32: within the float32
+// bound of a sum of k products, plus one rounding to the half at the end
+// (eps, relative) and its smallest subnormal step (tiny).
+func halfMatmul<T: dtype.Number>(_ name: string, _ t: T.Type, eps: float64, tiny: float64) async throws {
+    for (m, n, k) in shapes {
+        for (ta, tb) in [(false, false), (true, false), (false, true)] {
+            var ah: [T] = [], bh: [T] = []
+            for _ in 0..<(m * k) { ah.append(T.FromFloat64(float64(rng.Float32()) * 2 - 1)) }
+            for _ in 0..<(k * n) { bh.append(T.FromFloat64(float64(rng.Float32()) * 2 - 1)) }
+            let pa = ah.map { T.ToFloat64($0) }, pb = bh.map { T.ToFloat64($0) }
+            let want = hostMatmul(pa, pb, m, n, k, ta, tb)
+            let sums = hostProducts(pa, pb, m, n, k, ta, tb, true)
+            var bound: [float64] = []
+            for i in 0..<want.count {
+                bound.append(sums[i] * float64(k + 2) * 5.960464477539063e-08 + want[i].magnitude * eps + tiny)
+            }
+            let what = "\(name) \(m)x\(n)x\(k) t\(ta ? 1 : 0)\(tb ? 1 : 0)"
+            for d in gputest.Devices() {
+                let c = try await d.CreateBuffer(of: T.self, count: m * n)
+                try await linalg.Matmul(try await d.Upload(ah), try await d.Upload(bh), into: c,
+                                        linalg.Shape(m: m, n: n, k: k, transposeA: ta, transposeB: tb))
+                gputest.Near("Matmul \(what)", d, (try await c.Download()).map { float32(T.ToFloat64($0)) }, want, bound: bound)
+            }
+        }
+    }
+    // A sum a half cannot hold on the way: 4096 ones, which a half sum
+    // stops growing at 2048 (float16) or 256 (bfloat16).
+    let ones = [T](repeating: T.FromFloat64(1), count: 4096)
+    for d in gputest.Devices() {
+        let y = try await d.CreateBuffer(of: T.self, count: 1)
+        try await linalg.Gemv(try await d.Upload(ones), try await d.Upload(ones), into: y, m: 1, k: 4096)
+        let c = try await d.CreateBuffer(of: T.self, count: 1)
+        try await linalg.Matmul(try await d.Upload(ones), try await d.Upload(ones), into: c, linalg.Shape(m: 1, n: 1, k: 4096))
+        gputest.Equal("Gemv \(name) accumulates in float32", d, try await y.Download(), [T.FromFloat64(4096)])
+        gputest.Equal("Matmul \(name) accumulates in float32", d, try await c.Download(), [T.FromFloat64(4096)])
+    }
+}
+
+try await halfMatmul("f16", float16.self, eps: 4.8828125e-04, tiny: 5.960464477539063e-08)
+try await halfMatmul("bf16", bfloat16.self, eps: 3.90625e-03, tiny: 1e-38)
+
+// ---- block-quantized: q4_0 and q8_0 ----
+
+// ggml's dequantize_row_q4_0 and _q8_0, on the host: element j of the
+// block at byte at.
+func hostDecode(_ q8: bool, _ b: [uint8], _ at: int, _ j: int) -> float32 {
+    let d = float32(float16(bitPattern: uint16(b[at]) | uint16(b[at + 1]) << 8))
+    if q8 {
+        return float32(int8(bitPattern: b[at + 2 + j])) * d
+    }
+    let q = b[at + 2 + (j & 15)]
+    return float32(int32(j < 16 ? q & 0x0F : q >> 4) - 8) * d
+}
+
+// Random blocks: a scale of a size weights have, and random quants.
+func blocks(_ q8: bool, _ rows: int, _ k: int) -> [uint8] {
+    let size = q8 ? 34 : 18
+    var out: [uint8] = []
+    for _ in 0..<(rows * k / 32) {
+        let d = float16(rng.Float32() * 0.02 + 0.001).bitPattern
+        out.append(uint8(truncatingIfNeeded: d))
+        out.append(uint8(truncatingIfNeeded: d >> 8))
+        for _ in 0..<(size - 2) { out.append(uint8(truncatingIfNeeded: rng.Uint32())) }
+    }
+    return out
+}
+
+func quantized<B: dtype.Block>(_ name: string, _ format: B, _ q8: bool) async throws {
+    for (m, k) in [(1, 32), (7, 64), (288, 288), (768, 288), (288, 768), (100, 4096)] {
+        let w = blocks(q8, m, k)
+        var x: [float32] = []
+        for _ in 0..<k { x.append(rng.Float32() * 2 - 1) }
+        var dense: [float32] = [], want: [float64] = [], bound: [float64] = []
+        for r in 0..<m {
+            var s: float64 = 0, a: float64 = 0
+            for c in 0..<k {
+                let v = hostDecode(q8, w, (r * k + c) / 32 * B.Bytes(), c % 32)
+                dense.append(v)
+                s += float64(v) * float64(x[c])
+                a += (float64(v) * float64(x[c])).magnitude
+            }
+            want.append(s)
+            bound.append(a * float64(k + 34) * 5.960464477539063e-08 + 1e-30)
+        }
+        for d in gputest.Devices() {
+            let wb = try await d.Upload(w)
+            let deq = try await d.CreateBuffer(of: float32.self, count: m * k)
+            try await dtype.Dequantize(wb, format, count: m * k, into: deq)
+            gputest.Equal("Dequantize \(name) \(m)x\(k)", d, try await deq.Download(), dense)
+            // One row by itself, from its byte offset: an embedding lookup.
+            let row = try await d.CreateBuffer(of: float32.self, count: k)
+            try await dtype.Dequantize(wb, format, at: (m - 1) * (k / 32) * B.Bytes(), count: k, into: row)
+            gputest.Equal("Dequantize \(name) last row \(m)x\(k)", d, try await row.Download(), Array(dense[((m - 1) * k)..<(m * k)]))
+            let y = try await d.CreateBuffer(of: float32.self, count: m)
+            try await linalg.Gemv(wb, format, try await d.Upload(x), into: y, m: m, k: k)
+            gputest.Near("Gemv \(name) \(m)x\(k)", d, try await y.Download(), want, bound: bound)
+            // Accumulating into what y holds: a residual added in the pass.
+            let base = (0..<m).map { float32($0) * 0.5 }
+            let acc = try await d.Upload(base)
+            try await linalg.Gemv(wb, format, try await d.Upload(x), into: acc, m: m, k: k, accumulate: true)
+            gputest.Near("Gemv \(name) \(m)x\(k) accumulating", d, try await acc.Download(),
+                         (0..<m).map { want[$0] + float64(base[$0]) }, bound: bound.map { $0 + 1e-6 * float64(m) })
+        }
+    }
+}
+
+// ---- stacked weights: [W0; W1; W2] · x in one launch ----
+
+// The same product with the weights stacked in three buffers and copied
+// into one: the same rows, the same kernel, the same bits.
+for (k, rows) in [(288, [288, 96, 96]), (4096, [64, 32, 32]), (64, [5, 1])] {
+    let x = (0..<k).map { _ in rng.Float32() * 2 - 1 }
+    for d in gputest.Devices() {
+        let xb = try await d.Upload(x)
+        let m = rows.reduce(0, +)
+        // float32
+        var fparts: [gpu.Buffer<float32>] = [], fall: [float32] = []
+        for r in rows {
+            let w = (0..<(r * k)).map { _ in rng.Float32() - 0.5 }
+            fparts.append(try await d.Upload(w))
+            fall += w
+        }
+        let ys = try d.CreateBuffer(of: float32.self, count: m), yc = try d.CreateBuffer(of: float32.self, count: m)
+        try await linalg.Gemv(fparts, rows: rows, xb, into: ys, k: k)
+        try await linalg.Gemv(try await d.Upload(fall), xb, into: yc, m: m, k: k)
+        gputest.Equal("Gemv f32 stacked \(rows)x\(k)", d, try await ys.Download(), try await yc.Download())
+        // q4_0 and q8_0
+        for q8 in [false, true] {
+            var parts: [gpu.Buffer<uint8>] = [], all: [uint8] = []
+            for r in rows {
+                let w = blocks(q8, r, k)
+                parts.append(try await d.Upload(w))
+                all += w
+            }
+            if q8 {
+                try await linalg.Gemv(parts, rows: rows, dtype.Q8_0(), xb, into: ys, k: k)
+                try await linalg.Gemv(try await d.Upload(all), dtype.Q8_0(), xb, into: yc, m: m, k: k)
+            } else {
+                try await linalg.Gemv(parts, rows: rows, dtype.Q4_0(), xb, into: ys, k: k)
+                try await linalg.Gemv(try await d.Upload(all), dtype.Q4_0(), xb, into: yc, m: m, k: k)
+            }
+            gputest.Equal("Gemv \(q8 ? "q8_0" : "q4_0") stacked \(rows)x\(k)", d, try await ys.Download(), try await yc.Download())
+        }
+    }
+}
+
+// ---- k-quants: q4_K and q6_K ----
+
+// Random blocks with small finite scales where each format keeps them;
+// Gemv against the device's own decode (checked bit for bit against
+// ggml's in model's test-quant) dotted with x in float64.
+func kblocks(_ rows: int, _ k: int, _ bytes: int, _ scaleAt: [int]) -> [uint8] {
+    var out: [uint8] = []
+    for _ in 0..<(rows * k / 256) {
+        var b: [uint8] = []
+        for _ in 0..<bytes { b.append(uint8(truncatingIfNeeded: rng.Uint32())) }
+        for at in scaleAt {
+            let d = float16(rng.Float32() * 0.01 + 0.0005).bitPattern
+            b[at] = uint8(truncatingIfNeeded: d)
+            b[at + 1] = uint8(truncatingIfNeeded: d >> 8)
+        }
+        out += b
+    }
+    return out
+}
+
+func kquant<B: dtype.Block>(_ name: string, _ format: B, _ scaleAt: [int]) async throws {
+    for (m, k) in [(1, 256), (37, 768), (768, 2048), (100, 4096)] {
+        let w = kblocks(m, k, B.Bytes(), scaleAt)
+        let x = (0..<k).map { _ in rng.Float32() * 2 - 1 }
+        for d in gputest.Devices() {
+            let wb = try await d.Upload(w)
+            let dense = try d.CreateBuffer(of: float32.self, count: m * k)
+            try await dtype.Dequantize(wb, format, count: m * k, into: dense)
+            let dw = try await dense.Download()
+            var want: [float64] = [], bound: [float64] = []
+            for r in 0..<m {
+                var s: float64 = 0, a: float64 = 0
+                for c in 0..<k {
+                    s += float64(dw[r * k + c]) * float64(x[c])
+                    a += (float64(dw[r * k + c]) * float64(x[c])).magnitude
+                }
+                want.append(s)
+                bound.append(a * float64(k + 64) * 5.960464477539063e-08 + 1e-30)
+            }
+            let y = try d.CreateBuffer(of: float32.self, count: m)
+            try await linalg.Gemv(wb, format, try await d.Upload(x), into: y, m: m, k: k)
+            gputest.Near("Gemv \(name) \(m)x\(k)", d, try await y.Download(), want, bound: bound)
+        }
+    }
+}
+
+try await kquant("q4_K", dtype.Q4_K(), [0, 2])
+try await kquant("q6_K", dtype.Q6_K(), [208])
+
+// ---- float16 and bfloat16 weights, as Blocks ----
+
+// Random halves in [-1, 1]; decode against the host's own widening, Gemv
+// against float64.
+func halves<B: dtype.Block>(_ name: string, _ format: B, _ bf16: bool) async throws {
+    for (m, k) in [(1, 16), (5, 48), (288, 288), (100, 4096)] {
+        var w: [uint8] = []
+        var dense: [float32] = []
+        for _ in 0..<(m * k) {
+            let v = rng.Float32() * 2 - 1
+            var bits: uint16 = 0
+            if bf16 {
+                bits = uint16(v.bitPattern >> 16)
+                dense.append(float32(bitPattern: uint32(bits) << 16))
+            } else {
+                bits = float16(v).bitPattern
+                dense.append(float32(float16(bitPattern: bits)))
+            }
+            w.append(uint8(truncatingIfNeeded: bits))
+            w.append(uint8(truncatingIfNeeded: bits >> 8))
+        }
+        let x = (0..<k).map { _ in rng.Float32() * 2 - 1 }
+        var want: [float64] = [], bound: [float64] = []
+        for r in 0..<m {
+            var s: float64 = 0, a: float64 = 0
+            for c in 0..<k {
+                s += float64(dense[r * k + c]) * float64(x[c])
+                a += (float64(dense[r * k + c]) * float64(x[c])).magnitude
+            }
+            want.append(s)
+            bound.append(a * float64(k + 16) * 5.960464477539063e-08 + 1e-30)
+        }
+        for d in gputest.Devices() {
+            let wb = try await d.Upload(w)
+            let deq = try await d.CreateBuffer(of: float32.self, count: m * k)
+            try await dtype.Dequantize(wb, format, count: m * k, into: deq)
+            gputest.Equal("Dequantize \(name) \(m)x\(k)", d, try await deq.Download(), dense)
+            let y = try await d.CreateBuffer(of: float32.self, count: m)
+            try await linalg.Gemv(wb, format, try await d.Upload(x), into: y, m: m, k: k)
+            gputest.Near("Gemv \(name) \(m)x\(k)", d, try await y.Download(), want, bound: bound)
+        }
+    }
+}
+
+try await halves("f16", dtype.F16(), false)
+try await halves("bf16", dtype.BF16(), true)
+
+try await quantized("q4_0", dtype.Q4_0(), false)
+try await quantized("q8_0", dtype.Q8_0(), true)
+
+gputest.Done()
