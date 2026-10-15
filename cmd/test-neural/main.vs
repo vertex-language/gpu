@@ -25,10 +25,10 @@ func matrix(_ n: int, _ scale: float32) -> [float32] {
 
 // Each check: the host reference within ulps, and the CPU device's bits on
 // every other device.
-func compare(_ what: string, _ got: [(gpu.Device, [float32])], _ want: [float64], ulps: int) {
+func compare(_ what: string, _ got: [(gpu.Device, [float32])], _ want: [float64], ulps: int, crossUlps: int = 1) {
     for (d, g) in got {
         gputest.Close(what, d, g, want.map { float32($0) }, ulps: ulps)
-        if !d.IsCPU { gputest.Close(what + " vs cpu", d, g, got[0].1, ulps: 1) }
+        if !d.IsCPU { gputest.Close(what + " vs cpu", d, g, got[0].1, ulps: crossUlps) }
     }
 }
 
@@ -99,7 +99,9 @@ for (rows, cols) in [(1, 1), (3, 7), (4, 256), (5, 1000), (2, 5000)] {
     compareNear("Softmax \(tag)", gs, soft, softB)
     compareNear("LogSoftmax \(tag)", gl, logSoft, logSoftB)
     compare("LogSumExp \(tag)", ge, lse, ulps: 16)
-    compare("RMSNorm \(tag)", gr, rms, ulps: 16)
+    // A GPU of 32-wide waves adds a row's squares by waves: the same
+    // sum in another order.
+    compare("RMSNorm \(tag)", gr, rms, ulps: 16, crossUlps: 4)
     compareNear("LayerNorm \(tag)", gn, ln, lnB)
     compare("CrossEntropy \(tag)", gc, ce, ulps: 64)
 }
@@ -195,6 +197,34 @@ for layout in [neural.RopeLayout.interleaved, neural.RopeLayout.halves] {
         }
         gputest.Equal(name + " a token at a position", d, each, g)
     }
+}
+
+// ---- argmax: the first greatest of each row ----
+
+for (rows, cols, ties) in [(1, 1, false), (3, 7, false), (2, 1000, true), (1, 32000, false), (1, 32000, true), (4, 5000, true)] {
+    var x = matrix(rows * cols, 20)
+    if ties {
+        // Equal greatest values in several places: the first is the one.
+        for r in 0..<rows {
+            for c in [cols / 3, cols / 2, cols - 1] { x[r * cols + c] = 99 }
+        }
+    }
+    var want: [int32] = []
+    for r in 0..<rows {
+        var best = 0
+        for c in 1..<max(1, cols) where x[r * cols + c] > x[r * cols + best] { best = c }
+        want.append(int32(best))
+    }
+    for d in gputest.Devices() {
+        let out = try await d.CreateBuffer(of: int32.self, count: rows)
+        try await neural.Argmax(try await d.Upload(x), into: out, rows: rows, cols: cols)
+        gputest.Equal("Argmax \(rows)x\(cols)\(ties ? " with ties" : "")", d, try await out.Download(), want)
+    }
+}
+for d in gputest.Devices() {
+    let out = try await d.CreateBuffer(of: int32.self, count: 1)
+    try await neural.Argmax(try await d.Upload([float32](repeating: -float32.infinity, count: 100)), into: out, rows: 1, cols: 100)
+    gputest.Equal("Argmax of -inf alone", d, try await out.Download(), [int32(0)])
 }
 
 gputest.Done()

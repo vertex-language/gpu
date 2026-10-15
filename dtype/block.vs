@@ -266,3 +266,30 @@ public struct Q6_K: Block {
     }
     try await _dequantizeKernel.Launch(format, b, at, y, count, over: count)
 }
+
+@inlinable public func _dequantizeRowKernel<B: Block>(_ f: B, _ b: gpu.Span<uint8>, _ rows: gpu.Span<int32>, _ index: int, _ rowBytes: int,
+                                                      _ tableRows: int, _ y: gpu.MutableSpan<float32>, _ n: int) kernel {
+    // The row is rows[index], read here: a row past the table is row 0.
+    let i = gpu.Index.x
+    if i < n {
+        var r = int(rows[index])
+        if r < 0 || r >= tableRows { r = 0 }
+        y[i] = B.Decode(b, r * rowBytes + i / B.Size() * B.Bytes(), i % B.Size())
+    }
+}
+
+/// DequantizeRow decodes row rows[index] of b -- a table of rows of
+/// rowBytes, count elements each, in the format -- into y, the row's
+/// number read on the device: an embedding lookup of a token the device
+/// chose, with nothing read back. A number outside the table's rows is
+/// row 0.
+@inlinable public func DequantizeRow<B: Block>(_ b: gpu.Buffer<uint8>, _ format: B, rows: gpu.Buffer<int32>, index: int, rowBytes: int,
+                                               count: int, into y: gpu.Buffer<float32>) async throws {
+    if count == 0 {
+        return
+    }
+    if index < 0 || index >= rows.count || rowBytes <= 0 || y.count < count || count / B.Size() * B.Bytes() > rowBytes {
+        throw gpu.DeviceError.badCount
+    }
+    try await _dequantizeRowKernel.Launch(format, b, rows, index, rowBytes, b.count / rowBytes, y, count, over: count)
+}

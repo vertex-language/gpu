@@ -92,6 +92,75 @@ public func LogSumExp(_ x: gpu.Buffer<float32>, rows: int, cols: int) async thro
     return out
 }
 
+// ---- argmax ----
+
+/// _argmaxLanes is the greater of each lane's (v, at) and its partner's
+/// across the wave, the lower index of equals.
+@inlinable func _argmaxLanes(_ v: float32, _ at: int) -> (float32, int) {
+    var bv = v, bi = at
+    var m = gpu.Wave.Size >> 1
+    while m > 0 {
+        let ov = gpu.Wave.ShuffleXor(bv, mask: m)
+        let oi = int(gpu.Wave.ShuffleXor(int32(bi), mask: m))
+        if ov > bv || (ov == bv && oi < bi) {
+            bv = ov
+            bi = oi
+        }
+        m = m >> 1
+    }
+    return (bv, bi)
+}
+
+func _argmaxRows(_ x: gpu.Span<float32>, _ out: gpu.MutableSpan<int32>, _ cols: int) kernel {
+    // A group a row: 32 waves of 32 on a GPU, one work-item on the CPU.
+    // Each work-item keeps the first greatest of its strided share, the
+    // lanes of a wave meet by shuffles, and the waves in shared storage.
+    let bestV = gpu.Shared<float32>(count: 32)
+    let bestI = gpu.Shared<int32>(count: 32)
+    let row = gpu.GroupIndex.x
+    let t = gpu.LocalIndex.x
+    let n = gpu.GroupSize.x
+    let p = x._base + row &* cols
+    var v = -float32.infinity
+    var at = cols
+    var j = t
+    while j < cols {
+        let e = p[j]
+        if e > v {
+            v = e
+            at = j
+        }
+        j = j &+ n
+    }
+    var best = _argmaxLanes(v, at)
+    if n > 1 {
+        if t & 31 == 0 {
+            bestV[t >> 5] = best.0
+            bestI[t >> 5] = int32(best.1)
+        }
+        gpu.Barrier()
+        if t < 32 {
+            best = _argmaxLanes(bestV[t], int(bestI[t]))
+        }
+    }
+    if t == 0 {
+        // Nothing greater than -inf: the first element, as on the host.
+        out[row] = int32(best.1 == cols ? 0 : best.1)
+    }
+}
+
+/// Argmax writes each row's index of its greatest element into out, the
+/// first of equals; a row with nothing greater than -inf (or only NaNs)
+/// gets 0. Greedy decoding's next token without reading the logits back.
+public func Argmax(_ x: gpu.Buffer<float32>, into out: gpu.Buffer<int32>, rows: int, cols: int) async throws {
+    if rows == 0 || cols == 0 { return }
+    if x.count < rows * cols || out.count < rows || cols >= 1 << 31 {
+        throw gpu.DeviceError.badCount
+    }
+    let group = out.Device.WaveSize == 32 ? 1024 : 1
+    try await _argmaxRows.Launch(x, out, cols, over: rows * group, workgroup: group)
+}
+
 // ---- normalization ----
 
 func _rmsNormRows(_ x: gpu.Span<float32>, _ w: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>, _ cols: int, _ eps: float32) kernel {
@@ -114,10 +183,60 @@ func _rmsNormRows(_ x: gpu.Span<float32>, _ w: gpu.Span<float32>, _ y: gpu.Mutab
     }
 }
 
+func _rmsNormWaves(_ x: gpu.Span<float32>, _ w: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>, _ cols: int, _ eps: float32, _ waves: int) kernel {
+    // A row takes `waves` waves of 32 lanes. Each lane squares a strided
+    // share of it, read unchecked (RMSNorm checked the counts), and a wave
+    // adds its lanes by shuffles; only with more than one wave do their
+    // sums meet in shared storage, past one barrier. A decoded token's
+    // row, a few hundred wide, is one wave and no barrier at all.
+    let parts = gpu.Shared<float32>(count: 32)
+    let row = gpu.GroupIndex.x
+    let me = gpu.LocalIndex.x
+    let step = waves &* 32
+    let p = x._base + row &* cols
+    var s: float32 = 0
+    var j = me
+    while j < cols {
+        let v = p[j]
+        s = s + v * v
+        j = j &+ step
+    }
+    s = gpu.Wave.Sum(s)
+    if waves > 1 {
+        if gpu.Wave.Lane == 0 { parts[me &>> 5] = s }
+        gpu.Barrier()
+        s = 0
+        var i = 0
+        while i < waves {
+            s = s + parts[i]
+            i = i &+ 1
+        }
+    }
+    let scale = math.Rsqrt(s / float32(cols) + eps)
+    let q = y._base + row &* cols
+    let g = w._base
+    j = me
+    while j < cols {
+        q[j] = p[j] * scale * g[j]
+        j = j &+ step
+    }
+}
+
 /// RMSNorm writes each row of x scaled to unit root-mean-square and then
 /// by weight (cols elements): y = x / sqrt(mean(x²) + eps) · weight.
 public func RMSNorm(_ x: gpu.Buffer<float32>, weight: gpu.Buffer<float32>, into y: gpu.Buffer<float32>, rows: int, cols: int, eps: float32 = 1e-6) async throws {
     if rows == 0 || cols == 0 { return }
+    if y.Device.WaveSize == 32 {
+        if x.count < rows * cols || y.count < rows * cols || weight.count < cols {
+            throw gpu.DeviceError.badCount
+        }
+        // A wave for every 128 elements of a row, up to a group of 1024:
+        // a lane takes about four, since a row this short is a chain of
+        // dependent loads, and the longer each lane's the slower it runs.
+        let waves = min(32, max(1, (cols + 127) / 128))
+        try await _rmsNormWaves.Launch(x, weight, y, cols, eps, waves, over: rows * waves * 32, workgroup: waves * 32)
+        return
+    }
     try await _rmsNormRows.Launch(x, weight, y, cols, eps, over: rows * 256, workgroup: 256)
 }
 
@@ -300,6 +419,52 @@ public func RoPE(_ x: gpu.Buffer<float32>, positions: gpu.Buffer<int32>, heads: 
     let total = positions.count * heads * (dim / 2)
     if total == 0 { return }
     try await _rope.Launch(x, positions, heads, dim, base, layout.code, over: total)
+}
+
+/// RopeTable is the cosines and sines RoPE turns by: for each position
+/// below Positions and each pair p of a head of Dim, of the angle
+/// position · base^(-2p/Dim), computed once on the host in float64. With
+/// it a decoded token's turn is two loads a pair, where computing it is an
+/// exponential, a logarithm, a cosine and a sine. A model's layers share
+/// one.
+public final class RopeTable {
+    /// Cos and Sin are [Positions, Dim/2], row-major.
+    public let Cos: gpu.Buffer<float32>
+    public let Sin: gpu.Buffer<float32>
+    public let Dim: int
+    public let Positions: int
+    public let Base: float32
+
+    init(cos: gpu.Buffer<float32>, sin: gpu.Buffer<float32>, dim: int, positions: int, base: float32) {
+        self.Cos = cos
+        self.Sin = sin
+        self.Dim = dim
+        self.Positions = positions
+        self.Base = base
+    }
+
+    /// Make is the table for heads of dim (even) and positions below
+    /// positions, on device d.
+    public static func Make(on d: gpu.Device, dim: int, positions: int, base: float32) async throws -> RopeTable {
+        let pairs = dim / 2
+        var c = [float32](repeating: 0, count: max(1, positions * pairs))
+        var s = c
+        for p in 0..<pairs {
+            let freq = math.Pow(float64(base), -2 * float64(p) / float64(dim))
+            for t in 0..<positions {
+                let a = float64(t) * freq
+                c[t * pairs + p] = float32(math.Cos(a))
+                s[t * pairs + p] = float32(math.Sin(a))
+            }
+        }
+        return RopeTable(cos: try await d.Upload(c), sin: try await d.Upload(s), dim: dim, positions: positions, base: base)
+    }
+
+    /// Fits is whether the table turns heads of dim at every position below
+    /// positions, by base.
+    public func Fits(dim: int, positions: int, base: float32) -> bool {
+        return Dim == dim && Positions >= positions && Base == base
+    }
 }
 
 // ---- losses ----

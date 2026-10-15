@@ -70,7 +70,16 @@ for (shape, window) in cases {
             let got = try await o.Download()
             // Values are averages of numbers in [-1, 1): an absolute bound.
             gputest.Near("Forward \(tag) \(mask)", d, got, want, bound: want.map { _ in 2e-5 })
-            if d.IsCPU { cpu = got } else { gputest.Close("Forward \(tag) \(mask) vs cpu", d, got, cpu, ulps: 1) }
+            // One query on a GPU of 32-wide waves adds by waves
+            // (_attendDecode): the same sums in another order, so close
+            // to the CPU's rather than equal in all but the last bit.
+            if d.IsCPU {
+                cpu = got
+            } else if shape.queries == 1 && shape.batch == 1 {
+                gputest.Near("Forward \(tag) \(mask) vs cpu", d, got, cpu.map { float64($0) }, bound: cpu.map { _ in 1e-6 })
+            } else {
+                gputest.Close("Forward \(tag) \(mask) vs cpu", d, got, cpu, ulps: 1)
+            }
         }
     }
 }

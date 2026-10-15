@@ -299,8 +299,10 @@ public func _stack(_ counts: [int], _ rows: [int], _ k: int, _ bytesPerRow: int,
     }
 }
 
-@inlinable public func _gemvQ4_0Kernel(_ w0: gpu.Span<uint8>, _ w1: gpu.Span<uint8>, _ w2: gpu.Span<uint8>, _ x: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>,
-                                       _ m0: int, _ m1: int, _ m: int, _ k: int, _ accumulate: bool) kernel {
+/// _gemvQ4_0Sums is the dot products of the rows at p0, p1, p2, p3 with x, added
+/// across the wave.
+@inlinable public func _gemvQ4_0Sums(_ p0: UnsafeMutablePointer<uint8>, _ p1: UnsafeMutablePointer<uint8>, _ p2: UnsafeMutablePointer<uint8>, _ p3: UnsafeMutablePointer<uint8>,
+                                     _ x: gpu.Span<float32>, _ k: int) -> (float32, float32, float32, float32) {
     // llama.cpp's q4_0 matrix-vector product (mul_vec_q_n_f32_impl), on
     // a GPU with waves of 32. A wave takes 4 rows, so each x it loads is
     // used four times; a lane takes half a block, so a wave covers 16
@@ -308,12 +310,7 @@ public func _stack(_ counts: [int], _ rows: [int], _ k: int, _ bytesPerRow: int,
     // x scaled to match (1, 1/256, 1/16, 1/4096), and a block's -8 offset
     // is one multiply of the sum of its x: d·(Σq·x - 8·Σx).
     let lane = gpu.Wave.Lane
-    let r0 = (gpu.GroupIndex.x * 2 + gpu.LocalIndex.x / 32) * 4
-    if r0 >= m { return }
     let nb = k / 32
-    let rowBytes = nb &* 18
-    let p0 = _rowAt(w0, w1, w2, r0, m0, m1, m, rowBytes), p1 = _rowAt(w0, w1, w2, r0 &+ 1, m0, m1, m, rowBytes)
-    let p2 = _rowAt(w0, w1, w2, r0 &+ 2, m0, m1, m, rowBytes), p3 = _rowAt(w0, w1, w2, r0 &+ 3, m0, m1, m, rowBytes)
     let il = (lane % 2) &* 8
     var s0: float32 = 0, s1: float32 = 0, s2: float32 = 0, s3: float32 = 0
     var ib = lane / 2
@@ -346,7 +343,18 @@ public func _stack(_ counts: [int], _ rows: [int], _ k: int, _ bytesPerRow: int,
         ib = ib &+ 16
     }
     let t0 = gpu.Wave.Sum(s0), t1 = gpu.Wave.Sum(s1), t2 = gpu.Wave.Sum(s2), t3 = gpu.Wave.Sum(s3)
-    if lane == 0 {
+    return (t0, t1, t2, t3)
+}
+
+/// _gemvQ4_0Rows writes the sums of the rows at p0, p1, p2, p3 from row r0 of y: the
+/// body of _gemvQ4_0Kernel and _gemvQ4_0OneKernel.
+@inlinable public func _gemvQ4_0Rows(_ p0: UnsafeMutablePointer<uint8>, _ p1: UnsafeMutablePointer<uint8>, _ p2: UnsafeMutablePointer<uint8>, _ p3: UnsafeMutablePointer<uint8>,
+                                     _ x: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>,
+                                     _ m: int, _ k: int, _ accumulate: bool) {
+    let r0 = (gpu.GroupIndex.x * 2 + gpu.LocalIndex.x / 32) * 4
+    if r0 >= m { return }
+    let (t0, t1, t2, t3) = _gemvQ4_0Sums(p0, p1, p2, p3, x, k)
+    if gpu.Wave.Lane == 0 {
         y[r0] = accumulate ? t0 + y[r0] : t0
         if r0 + 1 < m { y[r0 + 1] = accumulate ? t1 + y[r0 + 1] : t1 }
         if r0 + 2 < m { y[r0 + 2] = accumulate ? t2 + y[r0 + 2] : t2 }
@@ -354,8 +362,37 @@ public func _stack(_ counts: [int], _ rows: [int], _ k: int, _ bytesPerRow: int,
     }
 }
 
-@inlinable public func _gemvQ8_0Kernel(_ w0: gpu.Span<uint8>, _ w1: gpu.Span<uint8>, _ w2: gpu.Span<uint8>, _ x: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>,
+@inlinable public func _gemvQ4_0Kernel(_ w0: gpu.Span<uint8>, _ w1: gpu.Span<uint8>, _ w2: gpu.Span<uint8>, _ x: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>,
                                        _ m0: int, _ m1: int, _ m: int, _ k: int, _ accumulate: bool) kernel {
+    // Rows of weights stacked in up to three buffers (_rowAt).
+    let r0 = (gpu.GroupIndex.x * 2 + gpu.LocalIndex.x / 32) * 4
+    if r0 >= m { return }
+    let nb = k / 32
+    let rowBytes = nb &* 18
+    let p0 = _rowAt(w0, w1, w2, r0, m0, m1, m, rowBytes), p1 = _rowAt(w0, w1, w2, r0 &+ 1, m0, m1, m, rowBytes)
+    let p2 = _rowAt(w0, w1, w2, r0 &+ 2, m0, m1, m, rowBytes), p3 = _rowAt(w0, w1, w2, r0 &+ 3, m0, m1, m, rowBytes)
+    _gemvQ4_0Rows(p0, p1, p2, p3, x, y, m, k, accumulate)
+}
+
+@inlinable public func _gemvQ4_0OneKernel(_ w: gpu.Span<uint8>, _ x: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>,
+                                          _ m: int, _ k: int, _ accumulate: bool) kernel {
+    // _gemvQ4_0Kernel over one weight: its rows read where they are, not chosen
+    // among three buffers -- the same sums in the same order.
+    let r0 = (gpu.GroupIndex.x * 2 + gpu.LocalIndex.x / 32) * 4
+    if r0 >= m { return }
+    let nb = k / 32
+    let rowBytes = nb &* 18
+    let p0 = w._base + (r0 < m ? r0 : m &- 1) &* rowBytes
+    let p1 = w._base + (r0 &+ 1 < m ? r0 &+ 1 : m &- 1) &* rowBytes
+    let p2 = w._base + (r0 &+ 2 < m ? r0 &+ 2 : m &- 1) &* rowBytes
+    let p3 = w._base + (r0 &+ 3 < m ? r0 &+ 3 : m &- 1) &* rowBytes
+    _gemvQ4_0Rows(p0, p1, p2, p3, x, y, m, k, accumulate)
+}
+
+/// _gemvQ8_0Pair is the body of _gemvQ8_0Kernel and _gemvQ8_0OneKernel:
+/// the rows at p0 and p1.
+@inlinable public func _gemvQ8_0Pair(_ p0: UnsafeMutablePointer<uint8>, _ p1: UnsafeMutablePointer<uint8>, _ x: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>,
+                                     _ m: int, _ k: int, _ accumulate: bool) {
     // llama.cpp's q8_0 matrix-vector product (kernel_mul_mv_q8_0_f32), on
     // a GPU with waves of 32. A group of four waves takes 2 rows; a lane
     // takes 8 quants, a quarter of a block, so a wave covers 8 blocks and
@@ -366,8 +403,6 @@ public func _stack(_ counts: [int], _ rows: [int], _ k: int, _ bytesPerRow: int,
     let wave = gpu.LocalIndex.x / 32
     let r0 = gpu.GroupIndex.x * 2
     let nb = k / 32
-    let rowBytes = nb &* 34
-    let p0 = _rowAt(w0, w1, w2, r0, m0, m1, m, rowBytes), p1 = _rowAt(w0, w1, w2, r0 &+ 1, m0, m1, m, rowBytes)
     let il = (lane % 4) &* 8
     var s0: float32 = 0, s1: float32 = 0
     var ib = wave &* 8 &+ lane / 4
@@ -399,10 +434,104 @@ public func _stack(_ counts: [int], _ rows: [int], _ k: int, _ bytesPerRow: int,
         if r0 < m { y[r0] = accumulate ? u0 + y[r0] : u0 }
         if r0 + 1 < m { y[r0 + 1] = accumulate ? u1 + y[r0 + 1] : u1 }
     }
+
 }
 
-@inlinable public func _gemvQ4_KKernel(_ w0: gpu.Span<uint8>, _ w1: gpu.Span<uint8>, _ w2: gpu.Span<uint8>, _ x: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>,
+@inlinable public func _gemvQ8_0Kernel(_ w0: gpu.Span<uint8>, _ w1: gpu.Span<uint8>, _ w2: gpu.Span<uint8>, _ x: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>,
                                        _ m0: int, _ m1: int, _ m: int, _ k: int, _ accumulate: bool) kernel {
+    // Rows of weights stacked in up to three buffers (_rowAt).
+    let r0 = gpu.GroupIndex.x * 2
+    let nb = k / 32
+    let rowBytes = nb &* 34
+    let p0 = _rowAt(w0, w1, w2, r0, m0, m1, m, rowBytes), p1 = _rowAt(w0, w1, w2, r0 &+ 1, m0, m1, m, rowBytes)
+    _gemvQ8_0Pair(p0, p1, x, y, m, k, accumulate)
+}
+
+@inlinable public func _gemvQ8_0OneKernel(_ w: gpu.Span<uint8>, _ x: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>,
+                                          _ m: int, _ k: int, _ accumulate: bool) kernel {
+    // _gemvQ8_0Kernel over one weight: its rows read where they are, not chosen
+    // among three buffers -- the same sums in the same order.
+    let r0 = gpu.GroupIndex.x * 2
+    let nb = k / 32
+    let rowBytes = nb &* 34
+    let p0 = w._base + (r0 < m ? r0 : m &- 1) &* rowBytes
+    let p1 = w._base + (r0 &+ 1 < m ? r0 &+ 1 : m &- 1) &* rowBytes
+    _gemvQ8_0Pair(p0, p1, x, y, m, k, accumulate)
+}
+
+/// _dot8q is eight int8 quants at q dotted with eight floats.
+@inlinable public func _dot8q(_ q: UnsafeMutablePointer<uint8>, _ x0: float32, _ x1: float32, _ x2: float32, _ x3: float32,
+                              _ x4: float32, _ x5: float32, _ x6: float32, _ x7: float32) -> float32 {
+    return float32(int8(bitPattern: q[0])) * x0 + float32(int8(bitPattern: q[1])) * x1
+        + float32(int8(bitPattern: q[2])) * x2 + float32(int8(bitPattern: q[3])) * x3
+        + float32(int8(bitPattern: q[4])) * x4 + float32(int8(bitPattern: q[5])) * x5
+        + float32(int8(bitPattern: q[6])) * x6 + float32(int8(bitPattern: q[7])) * x7
+}
+
+/// _gemvQ8_0Rows is the body of the short-row q8_0 kernels: four rows,
+/// at p0 to p3, dotted with x by one wave, written to y from r0.
+@inlinable public func _gemvQ8_0Rows(_ p0: UnsafeMutablePointer<uint8>, _ p1: UnsafeMutablePointer<uint8>, _ p2: UnsafeMutablePointer<uint8>,
+                                     _ p3: UnsafeMutablePointer<uint8>, _ x: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>,
+                                     _ r0: int, _ m: int, _ nb: int, _ accumulate: bool) {
+    let lane = gpu.Wave.Lane
+    let il = (lane & 3) &* 8
+    var s0: float32 = 0, s1: float32 = 0, s2: float32 = 0, s3: float32 = 0
+    var ib = lane >> 2
+    while ib < nb {
+        let xb = x._base + (ib &* 32 &+ il)
+        let x0 = xb[0], x1 = xb[1], x2 = xb[2], x3 = xb[3], x4 = xb[4], x5 = xb[5], x6 = xb[6], x7 = xb[7]
+        let off = ib &* 34
+        let q = off &+ 2 &+ il
+        s0 = s0 + _dot8q(p0 + q, x0, x1, x2, x3, x4, x5, x6, x7) * dtype._scaleAt(p0 + off)
+        s1 = s1 + _dot8q(p1 + q, x0, x1, x2, x3, x4, x5, x6, x7) * dtype._scaleAt(p1 + off)
+        s2 = s2 + _dot8q(p2 + q, x0, x1, x2, x3, x4, x5, x6, x7) * dtype._scaleAt(p2 + off)
+        s3 = s3 + _dot8q(p3 + q, x0, x1, x2, x3, x4, x5, x6, x7) * dtype._scaleAt(p3 + off)
+        ib = ib &+ 8
+    }
+    let t0 = gpu.Wave.Sum(s0), t1 = gpu.Wave.Sum(s1), t2 = gpu.Wave.Sum(s2), t3 = gpu.Wave.Sum(s3)
+    if lane == 0 {
+        if r0 < m { y[r0] = accumulate ? t0 + y[r0] : t0 }
+        if r0 &+ 1 < m { y[r0 &+ 1] = accumulate ? t1 + y[r0 &+ 1] : t1 }
+        if r0 &+ 2 < m { y[r0 &+ 2] = accumulate ? t2 + y[r0 &+ 2] : t2 }
+        if r0 &+ 3 < m { y[r0 &+ 3] = accumulate ? t3 + y[r0 &+ 3] : t3 }
+    }
+}
+
+@inlinable public func _gemvQ8_0RowsKernel(_ w: gpu.Span<uint8>, _ x: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>,
+                                           _ m: int, _ k: int, _ accumulate: bool) kernel {
+    // q8_0 for one weight of short rows -- a model's head, k a few
+    // hundred -- after llama.cpp's kernel_mul_mv_q8_0_f32 with one wave a
+    // group. A wave takes 4 rows; a lane takes 8 quants, a quarter of a
+    // block, so the wave covers 8 blocks side by side and each x it loads
+    // serves all four rows. Rows past m read the last row again. The
+    // rows' sums meet by shuffles: no shared storage, no barrier.
+    let r0 = gpu.GroupIndex.x &* 4
+    let nb = k >> 5
+    let rowBytes = nb &* 34
+    let last = m &- 1
+    let p0 = w._base + (r0 < last ? r0 : last) &* rowBytes
+    let p1 = w._base + (r0 &+ 1 < last ? r0 &+ 1 : last) &* rowBytes
+    let p2 = w._base + (r0 &+ 2 < last ? r0 &+ 2 : last) &* rowBytes
+    let p3 = w._base + (r0 &+ 3 < last ? r0 &+ 3 : last) &* rowBytes
+    _gemvQ8_0Rows(p0, p1, p2, p3, x, y, r0, m, nb, accumulate)
+}
+
+@inlinable public func _gemvQ8_0StackedRowsKernel(_ w0: gpu.Span<uint8>, _ w1: gpu.Span<uint8>, _ w2: gpu.Span<uint8>, _ x: gpu.Span<float32>,
+                                                  _ y: gpu.MutableSpan<float32>, _ m0: int, _ m1: int, _ m: int, _ k: int, _ accumulate: bool) kernel {
+    // _gemvQ8_0RowsKernel over weights stacked in up to three buffers --
+    // the same sums in the same order, so a stacked product is the one
+    // its weights copied into one buffer would give.
+    let r0 = gpu.GroupIndex.x &* 4
+    let nb = k >> 5
+    let rowBytes = nb &* 34
+    let p0 = _rowAt(w0, w1, w2, r0, m0, m1, m, rowBytes), p1 = _rowAt(w0, w1, w2, r0 &+ 1, m0, m1, m, rowBytes)
+    let p2 = _rowAt(w0, w1, w2, r0 &+ 2, m0, m1, m, rowBytes), p3 = _rowAt(w0, w1, w2, r0 &+ 3, m0, m1, m, rowBytes)
+    _gemvQ8_0Rows(p0, p1, p2, p3, x, y, r0, m, nb, accumulate)
+}
+
+/// _gemvQ4_KSums is the dot products of the rows at pa, pb with x, added
+/// across the wave.
+@inlinable public func _gemvQ4_KSums(_ pa: UnsafeMutablePointer<uint8>, _ pb: UnsafeMutablePointer<uint8>, _ x: gpu.Span<float32>, _ k: int) -> (float32, float32) {
     // llama.cpp's q4_K matrix-vector product (kernel_mul_mv_q4_K_f32), on
     // a GPU with waves of 32. A wave takes 2 rows; 8 lanes take a block of
     // 256, so a wave covers 4 blocks side by side. A lane takes 32 of a
@@ -412,11 +541,7 @@ public func _stack(_ counts: [int], _ rows: [int], _ k: int, _ bytesPerRow: int,
     // are masked in place against x scaled to match, and the mins are one
     // multiply each of a sum of x.
     let lane = gpu.Wave.Lane
-    let r0 = (gpu.GroupIndex.x &* 2 &+ (gpu.LocalIndex.x &>> 5)) &* 2
-    if r0 >= m { return }
     let nb = k &>> 8
-    let rowBytes = nb &* 144
-    let pa = _rowAt(w0, w1, w2, r0, m0, m1, m, rowBytes), pb = _rowAt(w0, w1, w2, r0 &+ 1, m0, m1, m, rowBytes)
     // The lane's place, by its bits: lanes are never negative.
     let ix = lane &>> 3, it = lane & 7
     let iq = it &>> 2, ir = it & 3
@@ -467,25 +592,56 @@ public func _stack(_ counts: [int], _ rows: [int], _ k: int, _ bytesPerRow: int,
         ib = ib &+ 4
     }
     let ta = gpu.Wave.Sum(sa), tb = gpu.Wave.Sum(sb)
-    if lane == 0 {
+    return (ta, tb)
+}
+
+/// _gemvQ4_KRows writes the sums of the rows at pa, pb from row r0 of y: the
+/// body of _gemvQ4_KKernel and _gemvQ4_KOneKernel.
+@inlinable public func _gemvQ4_KRows(_ pa: UnsafeMutablePointer<uint8>, _ pb: UnsafeMutablePointer<uint8>, _ x: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>,
+                                     _ m: int, _ k: int, _ accumulate: bool) {
+    let r0 = (gpu.GroupIndex.x &* 2 &+ (gpu.LocalIndex.x &>> 5)) &* 2
+    if r0 >= m { return }
+    let (ta, tb) = _gemvQ4_KSums(pa, pb, x, k)
+    if gpu.Wave.Lane == 0 {
         y[r0] = accumulate ? ta + y[r0] : ta
         if r0 + 1 < m { y[r0 + 1] = accumulate ? tb + y[r0 + 1] : tb }
     }
 }
 
-@inlinable public func _gemvQ6_KKernel(_ w0: gpu.Span<uint8>, _ w1: gpu.Span<uint8>, _ w2: gpu.Span<uint8>, _ x: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>,
+@inlinable public func _gemvQ4_KKernel(_ w0: gpu.Span<uint8>, _ w1: gpu.Span<uint8>, _ w2: gpu.Span<uint8>, _ x: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>,
                                        _ m0: int, _ m1: int, _ m: int, _ k: int, _ accumulate: bool) kernel {
+    // Rows of weights stacked in up to three buffers (_rowAt).
+    let r0 = (gpu.GroupIndex.x &* 2 &+ (gpu.LocalIndex.x &>> 5)) &* 2
+    if r0 >= m { return }
+    let nb = k &>> 8
+    let rowBytes = nb &* 144
+    let pa = _rowAt(w0, w1, w2, r0, m0, m1, m, rowBytes), pb = _rowAt(w0, w1, w2, r0 &+ 1, m0, m1, m, rowBytes)
+    _gemvQ4_KRows(pa, pb, x, y, m, k, accumulate)
+}
+
+@inlinable public func _gemvQ4_KOneKernel(_ w: gpu.Span<uint8>, _ x: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>,
+                                          _ m: int, _ k: int, _ accumulate: bool) kernel {
+    // _gemvQ4_KKernel over one weight: its rows read where they are, not chosen
+    // among three buffers -- the same sums in the same order.
+    let r0 = (gpu.GroupIndex.x &* 2 &+ (gpu.LocalIndex.x &>> 5)) &* 2
+    if r0 >= m { return }
+    let nb = k &>> 8
+    let rowBytes = nb &* 144
+    let pa = w._base + (r0 < m ? r0 : m &- 1) &* rowBytes
+    let pb = w._base + (r0 &+ 1 < m ? r0 &+ 1 : m &- 1) &* rowBytes
+    _gemvQ4_KRows(pa, pb, x, y, m, k, accumulate)
+}
+
+/// _gemvQ6_KSums is the dot products of the rows at pa, pb with x, added
+/// across the wave.
+@inlinable public func _gemvQ6_KSums(_ pa: UnsafeMutablePointer<uint8>, _ pb: UnsafeMutablePointer<uint8>, _ x: gpu.Span<float32>, _ k: int) -> (float32, float32) {
     // llama.cpp's q6_K matrix-vector product (kernel_mul_mv_q6_K_f32), on
     // a GPU with waves of 32. A wave takes 2 rows; 16 lanes take a block of
     // 256, so a wave covers 2 blocks side by side. A lane takes 4
     // consecutive elements of each quarter of one half of the block: its
     // low 4 bits from ql, its high 2 from qh, one scale a quarter.
     let lane = gpu.Wave.Lane
-    let r0 = (gpu.GroupIndex.x &* 2 &+ (gpu.LocalIndex.x &>> 5)) &* 2
-    if r0 >= m { return }
     let nb = k &>> 8
-    let rowBytes = nb &* 210
-    let pa = _rowAt(w0, w1, w2, r0, m0, m1, m, rowBytes), pb = _rowAt(w0, w1, w2, r0 &+ 1, m0, m1, m, rowBytes)
     // The lane's place, by its bits: lanes are never negative.
     let tid = lane &>> 1, ix = lane & 1
     let ip = tid &>> 3, il = tid & 7
@@ -523,10 +679,44 @@ public func _stack(_ counts: [int], _ rows: [int], _ k: int, _ bytesPerRow: int,
         ib = ib &+ 2
     }
     let ta = gpu.Wave.Sum(sa), tb = gpu.Wave.Sum(sb)
-    if lane == 0 {
+    return (ta, tb)
+}
+
+/// _gemvQ6_KRows writes the sums of the rows at pa, pb from row r0 of y: the
+/// body of _gemvQ6_KKernel and _gemvQ6_KOneKernel.
+@inlinable public func _gemvQ6_KRows(_ pa: UnsafeMutablePointer<uint8>, _ pb: UnsafeMutablePointer<uint8>, _ x: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>,
+                                     _ m: int, _ k: int, _ accumulate: bool) {
+    let r0 = (gpu.GroupIndex.x &* 2 &+ (gpu.LocalIndex.x &>> 5)) &* 2
+    if r0 >= m { return }
+    let (ta, tb) = _gemvQ6_KSums(pa, pb, x, k)
+    if gpu.Wave.Lane == 0 {
         y[r0] = accumulate ? ta + y[r0] : ta
         if r0 + 1 < m { y[r0 + 1] = accumulate ? tb + y[r0 + 1] : tb }
     }
+}
+
+@inlinable public func _gemvQ6_KKernel(_ w0: gpu.Span<uint8>, _ w1: gpu.Span<uint8>, _ w2: gpu.Span<uint8>, _ x: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>,
+                                       _ m0: int, _ m1: int, _ m: int, _ k: int, _ accumulate: bool) kernel {
+    // Rows of weights stacked in up to three buffers (_rowAt).
+    let r0 = (gpu.GroupIndex.x &* 2 &+ (gpu.LocalIndex.x &>> 5)) &* 2
+    if r0 >= m { return }
+    let nb = k &>> 8
+    let rowBytes = nb &* 210
+    let pa = _rowAt(w0, w1, w2, r0, m0, m1, m, rowBytes), pb = _rowAt(w0, w1, w2, r0 &+ 1, m0, m1, m, rowBytes)
+    _gemvQ6_KRows(pa, pb, x, y, m, k, accumulate)
+}
+
+@inlinable public func _gemvQ6_KOneKernel(_ w: gpu.Span<uint8>, _ x: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>,
+                                          _ m: int, _ k: int, _ accumulate: bool) kernel {
+    // _gemvQ6_KKernel over one weight: its rows read where they are, not chosen
+    // among three buffers -- the same sums in the same order.
+    let r0 = (gpu.GroupIndex.x &* 2 &+ (gpu.LocalIndex.x &>> 5)) &* 2
+    if r0 >= m { return }
+    let nb = k &>> 8
+    let rowBytes = nb &* 210
+    let pa = w._base + (r0 < m ? r0 : m &- 1) &* rowBytes
+    let pb = w._base + (r0 &+ 1 < m ? r0 &+ 1 : m &- 1) &* rowBytes
+    _gemvQ6_KRows(pa, pb, x, y, m, k, accumulate)
 }
 
 /// _q4KBlock is a lane's part of a q4_K block's dot product: its sums,
@@ -572,24 +762,49 @@ public func _stack(_ counts: [int], _ rows: [int], _ k: int, _ bytesPerRow: int,
     let wave = y.Device.WaveSize
     if wave == 32 && B.GGMLType() == 2 {
         // q4_0 on a GPU: 8 rows a group of two waves.
-        try await _gemvQ4_0Kernel.Launch(w0, w1, w2, x, y, m0, m1, m, k, accumulate, over: (m + 7) / 8 * 64, workgroup: 64)
+        if parts.count == 1 {
+            try await _gemvQ4_0OneKernel.Launch(w0, x, y, m, k, accumulate, over: (m + 7) / 8 * 64, workgroup: 64)
+        } else {
+            try await _gemvQ4_0Kernel.Launch(w0, w1, w2, x, y, m0, m1, m, k, accumulate, over: (m + 7) / 8 * 64, workgroup: 64)
+        }
         return
     }
     if wave == 32 && B.GGMLType() == 12 {
         // q4_K on a GPU: 4 rows a group of two waves.
-        try await _gemvQ4_KKernel.Launch(w0, w1, w2, x, y, m0, m1, m, k, accumulate, over: (m + 3) / 4 * 64, workgroup: 64)
+        if parts.count == 1 {
+            try await _gemvQ4_KOneKernel.Launch(w0, x, y, m, k, accumulate, over: (m + 3) / 4 * 64, workgroup: 64)
+        } else {
+            try await _gemvQ4_KKernel.Launch(w0, w1, w2, x, y, m0, m1, m, k, accumulate, over: (m + 3) / 4 * 64, workgroup: 64)
+        }
         return
     }
     if wave == 32 && B.GGMLType() == 14 {
         // q6_K on a GPU: 4 rows a group of two waves.
-        try await _gemvQ6_KKernel.Launch(w0, w1, w2, x, y, m0, m1, m, k, accumulate, over: (m + 3) / 4 * 64, workgroup: 64)
+        if parts.count == 1 {
+            try await _gemvQ6_KOneKernel.Launch(w0, x, y, m, k, accumulate, over: (m + 3) / 4 * 64, workgroup: 64)
+        } else {
+            try await _gemvQ6_KKernel.Launch(w0, w1, w2, x, y, m0, m1, m, k, accumulate, over: (m + 3) / 4 * 64, workgroup: 64)
+        }
+        return
+    }
+    if wave == 32 && B.GGMLType() == 8 && k < 1024 {
+        // q8_0 on a GPU, short rows: 4 rows a wave.
+        if parts.count == 1 {
+            try await _gemvQ8_0RowsKernel.Launch(w0, x, y, m, k, accumulate, over: (m + 3) / 4 * 32, workgroup: 32)
+        } else {
+            try await _gemvQ8_0StackedRowsKernel.Launch(w0, w1, w2, x, y, m0, m1, m, k, accumulate, over: (m + 3) / 4 * 32, workgroup: 32)
+        }
         return
     }
     if wave == 32 && B.GGMLType() == 8 && k >= 1024 {
         // q8_0 on a GPU: 2 rows a group of four waves, which a row of fewer
         // than 32 blocks cannot keep busy -- a model's small head is
-        // better served by the kernel below.
-        try await _gemvQ8_0Kernel.Launch(w0, w1, w2, x, y, m0, m1, m, k, accumulate, over: (m + 1) / 2 * 128, workgroup: 128)
+        // better served by the short-row kernel above.
+        if parts.count == 1 {
+            try await _gemvQ8_0OneKernel.Launch(w0, x, y, m, k, accumulate, over: (m + 1) / 2 * 128, workgroup: 128)
+        } else {
+            try await _gemvQ8_0Kernel.Launch(w0, w1, w2, x, y, m0, m1, m, k, accumulate, over: (m + 1) / 2 * 128, workgroup: 128)
+        }
         return
     }
     let per = _lanes(k / B.Size(), wave)

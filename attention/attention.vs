@@ -7,7 +7,9 @@
 // One workgroup of 128 computes one query row: each work-item scores one
 // key of the block (a dot product over d) and owns one dimension of the
 // output. Every sum is taken in a fixed order, so the result is the same
-// on every device that keeps subnormals. Head dimensions up to 128.
+// on every device that keeps subnormals -- but for decoding (one query) on
+// a GPU of 32-wide waves, which adds by waves (_attendDecode) and so
+// differs in the last bits. Head dimensions up to 128.
 //
 // Layouts are row-major: Q and O are [batch, heads, queries, d], K and V
 // [batch, kvHeads, capacity, d], the first keys of each head's capacity
@@ -180,6 +182,112 @@ func _attendOne(_ q: gpu.Span<float32>, _ k: gpu.Span<float32>, _ v: gpu.Span<fl
     }
 }
 
+func _attendDecode(_ q: gpu.Span<float32>, _ k: gpu.Span<float32>, _ v: gpu.Span<float32>, _ o: gpu.MutableSpan<float32>,
+                   _ group: int, _ keys: int, _ capacity: int, _ d: int, _ scale: float32, _ first: int) kernel {
+    // _attendOne on a GPU with waves of 32: one query a head, a group of
+    // eight waves. The grid is (heads a KV head has, KV heads), so a head's
+    // KV head is its group's y, not a division. Each work-item scores
+    // every 256th visible key; the most and the sum of exponentials are
+    // each a wave's shuffles and one barrier; and the output is gathered
+    // by the eight waves over an eighth of the keys each -- a lane holding
+    // up to four dimensions -- and their parts added in shared storage.
+    let scores = gpu.Shared<float32>(count: 4096)
+    let qs = gpu.Shared<float32>(count: 128)
+    let red = gpu.Shared<float32>(count: 16)
+    let parts = gpu.Shared<float32>(count: 1024)
+    let t = gpu.LocalIndex.x
+    let lane = t & 31
+    let wave = t >> 5
+    let kvHead = gpu.GroupIndex.y
+    let head = kvHead &* group &+ gpu.GroupIndex.x
+    let qp = q._base + head &* d
+    let kvBase = kvHead &* capacity &* d
+    if t < d {
+        qs[t] = qp[t]
+    }
+    gpu.Barrier()
+    // Scores: eight lanes a key, a lane every eighth dimension of it, so
+    // that the eight read the key's row together; four keys a wave and
+    // thirty-two a step. The step is the wave's, so every lane shuffles.
+    var most = -float32.infinity
+    let sub = lane & 7
+    var jb = first &+ (wave &<< 2)
+    while jb < keys {
+        let j = jb &+ (lane &>> 3)
+        var dot: float32 = 0
+        if j < keys {
+            let row = k._base + (kvBase &+ j &* d)
+            var c = sub
+            while c < d {
+                dot = dot + qs[c] * row[c]
+                c = c &+ 8
+            }
+        }
+        dot = dot + gpu.Wave.ShuffleXor(dot, mask: 4)
+        dot = dot + gpu.Wave.ShuffleXor(dot, mask: 2)
+        dot = dot + gpu.Wave.ShuffleXor(dot, mask: 1)
+        if j < keys && sub == 0 {
+            let s = dot * scale
+            scores[j] = s
+            most = s > most ? s : most
+        }
+        jb = jb &+ 32
+    }
+    most = gpu.Wave.Max(most)
+    if lane == 0 { red[wave] = most }
+    gpu.Barrier()
+    var m = red[0]
+    var w = 1
+    while w < 8 {
+        m = math.Max(m, red[w])
+        w = w &+ 1
+    }
+    var sum: float32 = 0
+    var j = first &+ t
+    while j < keys {
+        let e = math.Exp(scores[j] - m)
+        scores[j] = e
+        sum = sum + e
+        j = j &+ 256
+    }
+    sum = gpu.Wave.Sum(sum)
+    if lane == 0 { red[8 &+ wave] = sum }
+    gpu.Barrier()
+    var total: float32 = 0
+    w = 8
+    while w < 16 {
+        total = total + red[w]
+        w = w &+ 1
+    }
+    var a0: float32 = 0, a1: float32 = 0, a2: float32 = 0, a3: float32 = 0
+    let vb = v._base + kvBase
+    j = first &+ wave
+    while j < keys {
+        let p = scores[j]
+        let row = vb + j &* d
+        if lane < d { a0 = a0 + p * row[lane] }
+        if lane &+ 32 < d { a1 = a1 + p * row[lane &+ 32] }
+        if lane &+ 64 < d { a2 = a2 + p * row[lane &+ 64] }
+        if lane &+ 96 < d { a3 = a3 + p * row[lane &+ 96] }
+        j = j &+ 8
+    }
+    let at = wave &* 128 &+ lane
+    parts[at] = a0
+    parts[at &+ 32] = a1
+    parts[at &+ 64] = a2
+    parts[at &+ 96] = a3
+    gpu.Barrier()
+    if t < d {
+        var acc: float32 = 0
+        w = 0
+        while w < 8 {
+            acc = acc + parts[w &* 128 &+ t]
+            w = w &+ 1
+        }
+        o[head &* d &+ t] = total > 0 ? acc / total : 0
+    }
+}
+
 /// Forward is softmax(scale · Q·Kᵀ + mask) · V, written into o. scale is
 /// usually 1/√d. A query that may attend to no key gets zeros.
 public func Forward(q: gpu.Buffer<float32>, k: gpu.Buffer<float32>, v: gpu.Buffer<float32>, into o: gpu.Buffer<float32>,
@@ -193,6 +301,17 @@ public func Forward(q: gpu.Buffer<float32>, k: gpu.Buffer<float32>, v: gpu.Buffe
         // nothing, and a window of w keys starts w - 1 before it.
         let w = mask._window
         let first = w > 0 && shape.keys > w ? shape.keys - w : 0
+        if o.Device.WaveSize == 32 && shape.headDim <= MaxHeadDim {
+            if q.count < shape.heads * shape.headDim || o.count < shape.heads * shape.headDim
+                || k.count < shape.kvHeads * shape.keyCapacity * shape.headDim
+                || v.count < shape.kvHeads * shape.keyCapacity * shape.headDim {
+                throw gpu.DeviceError.badCount
+            }
+            let group = shape.heads / shape.kvHeads
+            try await _attendDecode.Launch(q, k, v, o, group, shape.keys, shape.keyCapacity, shape.headDim, scale, first,
+                                           over: (group * 256, shape.kvHeads, 1), workgroup: (256, 1, 1))
+            return
+        }
         try await _attendOne.Launch(q, k, v, o, shape.heads, shape.kvHeads, shape.keys, shape.keyCapacity, shape.headDim,
                                     scale, first, over: shape.heads * 128, workgroup: 128)
         return
