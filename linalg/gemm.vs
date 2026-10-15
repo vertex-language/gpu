@@ -130,3 +130,61 @@ import (
         col0 += rows[i]
     }
 }
+
+// ---- indexed products: a mixture of experts ----
+
+@inlinable public func _gemvIdsKernel<B: dtype.Block>(_ f: B, _ w: gpu.Span<uint8>, _ ids: gpu.Span<int32>, _ x: gpu.Span<float32>,
+                                                       _ y: gpu.MutableSpan<float32>, _ m: int, _ k: int, _ experts: int, _ items: int,
+                                                       _ xShared: int, _ per: int) kernel {
+    // Row `row` (x, a wave's lanes per row as Gemv takes them) of item i
+    // (y): the row of expert ids[i]'s weight -- experts of m rows of k,
+    // one after another -- dotted with x's row i, or with xShared > 1 the
+    // row i / xShared (a token's, which its xShared experts all read).
+    let lanes = gpu.Wave.Size
+    let sub = gpu.Wave.Lane % per
+    let row = (gpu.GroupIndex.x * (128 / lanes) + gpu.LocalIndex.x / lanes) * (lanes / per) + gpu.Wave.Lane / per
+    let i = gpu.GroupIndex.y
+    if i >= items { return }
+    var e = int(ids[i])
+    if e < 0 || e >= experts { e = 0 }
+    let blocks = k / B.Size()
+    let bytes = B.Bytes(), size = B.Size()
+    var r = row
+    if r >= m { r = m &- 1 }
+    let p = w._base + (e &* m &+ r) &* blocks &* bytes
+    let v = x._base + (i / xShared) &* k
+    var part: float32 = 0
+    var j = sub
+    while j < blocks {
+        part = part + B.Dot(p + j &* bytes, v + j &* size)
+        j = j &+ per
+    }
+    let total = _reduce(part, per)
+    if sub == 0 && row < m {
+        y[i &* m &+ row] = total
+    }
+}
+
+/// GemvIds is a mixture of experts' product: for each item i, y's row i
+/// (m floats) is W[ids[i]] · x's row i -- W experts weights of m rows of
+/// k in the format, one after another, as a GGUF's ffn_*_exps tensor holds
+/// them. With xShared, items share x's rows that many at a time (item i
+/// reads row i / xShared): a token's input, read by each of the experts
+/// chosen for it. An id outside the experts is expert 0.
+@inlinable public func GemvIds<B: dtype.Block>(_ w: gpu.Buffer<uint8>, _ format: B, ids: gpu.Buffer<int32>, _ x: gpu.Buffer<float32>,
+                                               into y: gpu.Buffer<float32>, m: int, k: int, experts: int, items: int,
+                                               xShared: int = 1) async throws {
+    if k % B.Size() != 0 {
+        fatalError("linalg.GemvIds: rows of \(k) are not whole blocks of \(B.Size())")
+    }
+    if items == 0 || m == 0 { return }
+    let rowBytes = k / B.Size() * B.Bytes()
+    if w.count < experts * m * rowBytes || ids.count < items || x.count < (items + xShared - 1) / xShared * k || y.count < items * m {
+        throw gpu.DeviceError.badCount
+    }
+    let wave = y.Device.WaveSize
+    let per = _lanes(k / B.Size(), wave)
+    let group = 128 / wave * (wave / per)
+    try await _gemvIdsKernel.Launch(format, w, ids, x, y, m, k, experts, items, xShared, per,
+                                    over: ((m + group - 1) / group * 128, items, 1), workgroup: (128, 1, 1))
+}
