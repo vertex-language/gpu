@@ -288,6 +288,9 @@ public enum Activation {
     case Tanh
     case Exp
     case Sin
+    /// ReLUSquared is relu(x)²: Primer's, and Nemotron's, Arcee's and
+    /// BitNet's MLPs.
+    case ReLUSquared
 
     public var _code: int32 {
         switch self {
@@ -299,6 +302,7 @@ public enum Activation {
         case .Tanh: return 5
         case .Exp: return 6
         case .Sin: return 7
+        case .ReLUSquared: return 8
         }
     }
 }
@@ -315,6 +319,7 @@ public enum Activation {
     if a == 4 { return math.Sigmoid(x) }
     if a == 6 { return math.Exp(x) }
     if a == 7 { return math.Sin(x) }
+    if a == 8 { return x > 0 ? x * x : 0 }
     return math.Tanh(x)
 }
 
