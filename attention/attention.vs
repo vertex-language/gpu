@@ -288,6 +288,140 @@ func _attendDecode(_ q: gpu.Span<float32>, _ k: gpu.Span<float32>, _ v: gpu.Span
     }
 }
 
+func _attendTiled(_ q: gpu.Span<float32>, _ k: gpu.Span<float32>, _ v: gpu.Span<float32>, _ o: gpu.MutableSpan<float32>,
+                  _ heads: int, _ kvHeads: int, _ queries: int, _ keys: int, _ capacity: int, _ d: int,
+                  _ scale: float32, _ causal: bool, _ window: int) kernel {
+    // Many queries at once -- a prompt -- a workgroup 16 of one head's,
+    // with every tile of 16 keys and values loaded once for all 16:
+    // flash attention's tiling, its online softmax kept a row at a time.
+    // Q, the output and a K or V tile live in shared storage; 128
+    // work-items score 2 query-key pairs each, one per row folds the
+    // scores into its running maximum and sum, and 8 a row add the tile
+    // of V into the row's output, each its own dimensions.
+    let qs = gpu.Shared<float32>(count: 2048)   // 16 queries x d (d ≤ 128)
+    let kv = gpu.Shared<float32>(count: 2048)   // 16 keys x d: K, then V
+    let os = gpu.Shared<float32>(count: 2048)   // 16 rows of output x d
+    let ss = gpu.Shared<float32>(count: 256)    // 16 x 16 scores, then weights
+    let st = gpu.Shared<float32>(count: 48)     // per row: max, sum, correction
+    let t = gpu.LocalIndex.x
+    let groups = (queries &+ 15) / 16
+    let g = gpu.GroupIndex.x
+    let qb = (g % groups) &* 16                  // the tile's first query
+    let bh = g / groups                          // batch · heads + head
+    let head = bh % heads
+    let batch = bh / heads
+    let kvHead = head / (heads / kvHeads)
+    let kvBase = (batch &* kvHeads &+ kvHead) &* capacity &* d
+    let qBase = bh &* queries &* d
+    let n = queries &- qb < 16 ? queries &- qb : 16
+    var e = t
+    while e < 16 &* d {
+        let r = e / d
+        qs[e] = r < n ? q[qBase &+ (qb &+ r) &* d &+ e % d] : 0
+        os[e] = 0
+        e = e &+ 128
+    }
+    if t < 16 {
+        st[t] = -float32.infinity
+        st[16 &+ t] = 0
+    }
+    // The keys any of the tile's queries may see: up to the last one's
+    // position, and from the first one's window.
+    let first = keys &- queries &+ qb
+    var end = keys
+    if causal { end = first &+ n }
+    var start = 0
+    if window > 0 && first &- window &+ 1 > 0 { start = first &- window &+ 1 }
+    var kb = start / 16 &* 16
+    gpu.Barrier()
+    while kb < end {
+        e = t
+        while e < 16 &* d {
+            let j = kb &+ e / d
+            kv[e] = j < keys ? k[kvBase &+ j &* d &+ e % d] : 0
+            e = e &+ 128
+        }
+        gpu.Barrier()
+        var pr = t
+        while pr < 256 {
+            let r = pr >> 4
+            let c = pr & 15
+            let j = kb &+ c
+            let position = first &+ r
+            var visible = r < n && j < keys
+            if causal && j > position { visible = false }
+            if window > 0 && j <= position &- window { visible = false }
+            var sc = -float32.infinity
+            if visible {
+                var dot: float32 = 0
+                var x = 0
+                while x < d {
+                    dot = dot + qs[r &* d &+ x] * kv[c &* d &+ x]
+                    x = x &+ 1
+                }
+                sc = dot * scale
+            }
+            ss[pr] = sc
+            pr = pr &+ 128
+        }
+        gpu.Barrier()
+        // V's tile over K's, while a thread a row turns its scores into
+        // weights against the row's new maximum.
+        e = t
+        while e < 16 &* d {
+            let j = kb &+ e / d
+            kv[e] = j < keys ? v[kvBase &+ j &* d &+ e % d] : 0
+            e = e &+ 128
+        }
+        if t < 16 {
+            var m = st[t]
+            var c = 0
+            while c < 16 {
+                m = math.Max(m, ss[t &* 16 &+ c])
+                c = c &+ 1
+            }
+            let old = st[t]
+            let corr = old == -float32.infinity ? float32(0) : math.Exp(old - m)
+            var sum: float32 = 0
+            c = 0
+            while c < 16 {
+                let sv = ss[t &* 16 &+ c]
+                let p = sv == -float32.infinity ? float32(0) : math.Exp(sv - m)
+                ss[t &* 16 &+ c] = p
+                sum = sum + p
+                c = c &+ 1
+            }
+            st[t] = m
+            st[16 &+ t] = st[16 &+ t] * corr + sum
+            st[32 &+ t] = corr
+        }
+        gpu.Barrier()
+        let r = t >> 3
+        let part = t & 7
+        let corr = st[32 &+ r]
+        var x = part
+        while x < d {
+            var acc = os[r &* d &+ x] * corr
+            var c = 0
+            while c < 16 {
+                acc = acc + ss[r &* 16 &+ c] * kv[c &* d &+ x]
+                c = c &+ 1
+            }
+            os[r &* d &+ x] = acc
+            x = x &+ 8
+        }
+        gpu.Barrier()
+        kb = kb &+ 16
+    }
+    e = t
+    while e < n &* d {
+        let r = e / d
+        let l = st[16 &+ r]
+        o[qBase &+ (qb &+ r) &* d &+ e % d] = l > 0 ? os[e] / l : 0
+        e = e &+ 128
+    }
+}
+
 /// Forward is softmax(scale · Q·Kᵀ + mask) · V, written into o. scale is
 /// usually 1/√d. A query that may attend to no key gets zeros.
 public func Forward(q: gpu.Buffer<float32>, k: gpu.Buffer<float32>, v: gpu.Buffer<float32>, into o: gpu.Buffer<float32>,
@@ -314,6 +448,19 @@ public func Forward(q: gpu.Buffer<float32>, k: gpu.Buffer<float32>, v: gpu.Buffe
         }
         try await _attendOne.Launch(q, k, v, o, shape.heads, shape.kvHeads, shape.keys, shape.keyCapacity, shape.headDim,
                                     scale, first, over: shape.heads * 128, workgroup: 128)
+        return
+    }
+    if shape.headDim <= MaxHeadDim {
+        if q.count < shape.batch * shape.heads * shape.queries * shape.headDim
+            || o.count < shape.batch * shape.heads * shape.queries * shape.headDim
+            || k.count < shape.batch * shape.kvHeads * shape.keyCapacity * shape.headDim
+            || v.count < shape.batch * shape.kvHeads * shape.keyCapacity * shape.headDim {
+            throw gpu.DeviceError.badCount
+        }
+        let groups = (shape.queries + 15) / 16
+        try await _attendTiled.Launch(q, k, v, o, shape.heads, shape.kvHeads, shape.queries, shape.keys, shape.keyCapacity,
+                                      shape.headDim, scale, mask._causal, mask._window,
+                                      over: shape.batch * shape.heads * groups * 128, workgroup: 128)
         return
     }
     try await _attend.Launch(q, k, v, o, shape.heads, shape.kvHeads, shape.queries, shape.keys, shape.keyCapacity, shape.headDim,

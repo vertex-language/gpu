@@ -444,13 +444,17 @@ public final class RopeTable {
     }
 
     /// Make is the table for heads of dim (even) and positions below
-    /// positions, on device d.
-    public static func Make(on d: gpu.Device, dim: int, positions: int, base: float32) async throws -> RopeTable {
+    /// positions, on device d. factors, when given, divide each pair's
+    /// frequency: Llama 3's rope_freqs, llama.cpp's freq_factors.
+    public static func Make(on d: gpu.Device, dim: int, positions: int, base: float32, factors: [float32]? = nil) async throws -> RopeTable {
         let pairs = dim / 2
         var c = [float32](repeating: 0, count: max(1, positions * pairs))
         var s = c
         for p in 0..<pairs {
-            let freq = math.Pow(float64(base), -2 * float64(p) / float64(dim))
+            var freq = math.Pow(float64(base), -2 * float64(p) / float64(dim))
+            if let f = factors, p < f.count {
+                freq = freq / float64(f[p])
+            }
             for t in 0..<positions {
                 let a = float64(t) * freq
                 c[t * pairs + p] = float32(math.Cos(a))

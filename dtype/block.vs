@@ -117,6 +117,21 @@ public struct F16: Block {
     }
 }
 
+/// F32 is float32 as a Block, one to a block: so that a float32 weight
+/// runs through the same Gemm and DequantizeRows as the others.
+public struct F32: Block {
+    public init() {}
+    @inlinable public static func GGMLType() -> int { return 0 }
+    @inlinable public static func Size() -> int { return 1 }
+    @inlinable public static func Bytes() -> int { return 4 }
+    @inlinable public static func Decode(_ b: gpu.Span<uint8>, _ at: int, _ j: int) -> float32 {
+        return float32(bitPattern: uint32(b[at]) | uint32(b[at + 1]) << 8 | uint32(b[at + 2]) << 16 | uint32(b[at + 3]) << 24)
+    }
+    @inlinable public static func Dot(_ block: UnsafeMutablePointer<uint8>, _ v: UnsafeMutablePointer<float32>) -> float32 {
+        return UnsafePointer<float32>(UnsafeRawPointer(block)).pointee * v[0]
+    }
+}
+
 /// BF16 is bfloat16 as a Block: the high half of a float32, 16 of them in
 /// 32 bytes -- the dtype most checkpoints on the Hugging Face Hub hold.
 /// Widening is exact.
@@ -292,4 +307,33 @@ public struct Q6_K: Block {
         throw gpu.DeviceError.badCount
     }
     try await _dequantizeRowKernel.Launch(format, b, rows, index, rowBytes, b.count / rowBytes, y, count, over: count)
+}
+
+@inlinable public func _dequantizeRowsKernel<B: Block>(_ f: B, _ b: gpu.Span<uint8>, _ rows: gpu.Span<int32>, _ first: int, _ rowBytes: int,
+                                                       _ tableRows: int, _ y: gpu.MutableSpan<float32>, _ n: int, _ count: int) kernel {
+    // Element i of output row t is element i of table row rows[first + t]:
+    // a row past the table is row 0.
+    let i = gpu.Index.x
+    let t = gpu.Index.y
+    if i < n && t < count {
+        var r = int(rows[first + t])
+        if r < 0 || r >= tableRows { r = 0 }
+        y[t * n + i] = B.Decode(b, r * rowBytes + i / B.Size() * B.Bytes(), i % B.Size())
+    }
+}
+
+/// DequantizeRows decodes rows rows[first..<first + count] of b -- a table
+/// of rows of rowBytes, n elements each, in the format -- into y, one after
+/// another: the embedding lookup of a batch of tokens, in one launch. A
+/// number outside the table's rows is row 0.
+@inlinable public func DequantizeRows<B: Block>(_ b: gpu.Buffer<uint8>, _ format: B, rows: gpu.Buffer<int32>, first: int = 0, count: int,
+                                                rowBytes: int, n: int, into y: gpu.Buffer<float32>) async throws {
+    if count == 0 || n == 0 {
+        return
+    }
+    if first < 0 || first + count > rows.count || rowBytes <= 0 || y.count < count * n || n / B.Size() * B.Bytes() > rowBytes {
+        throw gpu.DeviceError.badCount
+    }
+    try await _dequantizeRowsKernel.Launch(format, b, rows, first, rowBytes, b.count / rowBytes, y, n, count,
+                                           over: ((n + 63) / 64 * 64, count, 1), workgroup: (64, 1, 1))
 }

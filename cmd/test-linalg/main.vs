@@ -354,4 +354,74 @@ try await halves("bf16", dtype.BF16(), true)
 try await quantized("q4_0", dtype.Q4_0(), false)
 try await quantized("q8_0", dtype.Q8_0(), true)
 
+// ---- Gemm: many tokens at once, in every format ----
+
+// Y = X·Wᵀ against the device's own decode of W dotted with each token in
+// float64: odd shapes, every tile edge, stacked parts written side by
+// side, and accumulation into a residual.
+func gemm<B: dtype.Block>(_ name: string, _ format: B, _ make: (int, int) -> [uint8]) async throws {
+    for (m, n, k, parts) in [(5, 3, 256, 1), (96, 33, 512, 3), (300, 70, 256, 2), (64, 1, 768, 1)] {
+        let rows = parts == 1 ? [m] : parts == 2 ? [m - m / 3, m / 3] : [m / 2, m / 4, m - m / 2 - m / 4]
+        var ws: [[uint8]] = []
+        for r in rows { ws.append(make(r, k)) }
+        let x = (0..<(n * k)).map { _ in rng.Float32() * 2 - 1 }
+        let base = (0..<(n * m)).map { float32($0 % 7) * 0.25 }
+        for d in gputest.Devices() {
+            var bufs: [gpu.Buffer<uint8>] = []
+            var dense: [float32] = []
+            for i in 0..<rows.count {
+                let wb = try await d.Upload(ws[i])
+                bufs.append(wb)
+                let deq = try d.CreateBuffer(of: float32.self, count: rows[i] * k)
+                try await dtype.Dequantize(wb, format, count: rows[i] * k, into: deq)
+                dense += try await deq.Download()
+            }
+            var want: [float64] = [], bound: [float64] = []
+            for t in 0..<n {
+                for r in 0..<m {
+                    var s: float64 = 0, a: float64 = 0
+                    for c in 0..<k {
+                        let p = float64(dense[r * k + c]) * float64(x[t * k + c])
+                        s += p
+                        a += p.magnitude
+                    }
+                    want.append(s + float64(base[t * m + r]))
+                    bound.append(a * float64(k + 64) * 5.960464477539063e-08 + 1e-6)
+                }
+            }
+            let y = try await d.Upload(base)
+            try await linalg.Gemm(bufs, rows: rows, format, try await d.Upload(x), into: y, n: n, k: k, accumulate: true)
+            gputest.Near("Gemm \(name) \(rows)x\(k) of \(n) tokens", d, try await y.Download(), want, bound: bound)
+        }
+    }
+}
+
+func halfBlocks(_ bf16: bool) -> (int, int) -> [uint8] {
+    return { rows, k in
+        var w: [uint8] = []
+        for _ in 0..<(rows * k) {
+            let v = rng.Float32() * 2 - 1
+            let bits = bf16 ? uint16(v.bitPattern >> 16) : float16(v).bitPattern
+            w.append(uint8(truncatingIfNeeded: bits))
+            w.append(uint8(truncatingIfNeeded: bits >> 8))
+        }
+        return w
+    }
+}
+
+try await gemm("f32", dtype.F32(), { rows, k in
+    var w: [uint8] = []
+    for _ in 0..<(rows * k) {
+        let b = (rng.Float32() * 2 - 1).bitPattern
+        for s in [0, 8, 16, 24] { w.append(uint8(truncatingIfNeeded: b >> uint32(s))) }
+    }
+    return w
+})
+try await gemm("f16", dtype.F16(), halfBlocks(false))
+try await gemm("bf16", dtype.BF16(), halfBlocks(true))
+try await gemm("q4_0", dtype.Q4_0(), { rows, k in blocks(false, rows, k) })
+try await gemm("q8_0", dtype.Q8_0(), { rows, k in blocks(true, rows, k) })
+try await gemm("q4_K", dtype.Q4_K(), { rows, k in kblocks(rows, k, dtype.Q4_K.Bytes(), [0, 2]) })
+try await gemm("q6_K", dtype.Q6_K(), { rows, k in kblocks(rows, k, dtype.Q6_K.Bytes(), [208]) })
+
 gputest.Done()
