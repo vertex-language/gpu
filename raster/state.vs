@@ -1,6 +1,7 @@
 package raster
 
 import (
+    "gpu"
     "shader"
     "shader/interp"
 )
@@ -143,11 +144,30 @@ public final class Target {
 }
 
 /// Bytes a draw reads vertices or indices from.
+///
+/// On the GPU its bytes are copied to the device the first time a draw
+/// reads them and kept there: change Bytes in place and call Changed, or
+/// the device keeps drawing the old ones.
 public final class Buffer {
     public var Bytes: [uint8]
+    /// Counts the changes Changed was told of.
+    public private(set) var Version = 0
+    /// The device copy, and the Version and size it was made from.
+    var device: gpu.Buffer<uint8>? = nil
+    var deviceVersion = -1
+    /// The largest index in the last range of indices asked about (by
+    /// size, offset and count), so a draw from device indices binds only
+    /// vertices it can read.
+    var maxKey: [int] = []
+    var maxIndex = 0
 
     public init(_ bytes: [uint8] = []) {
         Bytes = bytes
+    }
+
+    /// Changed says Bytes was changed in place since it was last drawn.
+    public func Changed() {
+        Version += 1
     }
 }
 

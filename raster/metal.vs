@@ -31,6 +31,21 @@ public func EnableGPU() -> bool {
 /// Whether draws go to the GPU.
 public var GPUEnabled: bool { metal != nil }
 
+/// GPUDevice is the device renderers draw on; nil on the CPU.
+public var GPUDevice: gpu.Device? { metal?.device }
+
+extension Texture {
+    /// OnDevice is the texture's copy on the GPU, with everything drawn
+    /// into it so far submitted (the open pass ended) and the host's
+    /// levels sent if they're newer: for presenting a target in a window
+    /// (gpu.Layer) without reading it back. Nil on the CPU.
+    public func OnDevice() -> gpu.Texture? {
+        guard let m = metal else { return nil }
+        m.endPass()
+        return m.resident(self)
+    }
+}
+
 /// What the GPU has done: draws there, and draws that went to the CPU instead.
 public struct GPUStats {
     public var Draws = 0
@@ -65,7 +80,9 @@ final class GPUProgram {
     /// Uniform slots each stage reads (the rest are its temporaries).
     let vertexSlots: int
     let fragmentSlots: int
-    var pipelines: [string: gpu.RenderPipeline] = [:]
+    /// Pipelines made for it, each with the formats and blending it was
+    /// made for (see pipelineKey): a few, searched in order.
+    var pipelines: [keyed<gpu.RenderPipeline>] = []
 
     init(libraries: [gpu.Library], vertex: gpu.ShaderFunction, fragment: gpu.ShaderFunction,
          vertexSamplers: [msl.SamplerSlot], fragmentSamplers: [msl.SamplerSlot],
@@ -99,8 +116,10 @@ final class Metal {
     var passLevel = 0
     var passFace = 0
     var passDepth: Texture? = nil
-    var depthStates: [string: gpu.DepthStencilState] = [:]
-    var samplers: [string: gpu.SamplerState] = [:]
+    // States made so far, found by small integer keys: building a string
+    // key for each on every draw cost more than the draw.
+    var depthStates: [keyed<gpu.DepthStencilState>] = []
+    var samplers: [keyed<gpu.SamplerState>] = []
     // What an unbound or incomplete texture reads: (0, 0, 0, 1).
     var blank2D: gpu.Texture? = nil
     var blankCube: gpu.Texture? = nil
@@ -204,12 +223,14 @@ final class Metal {
         let mip = s.MipFilter == nil ? 0 : (s.MipFilter! == .nearest ? 1 : 2)
         let compare = s.Compare == nil ? -1 : compareCode(s.Compare!)
         let maxLod = min(s.MaxLod, float32(s.MaxLevel - s.BaseLevel))
-        let key = "\(s.MinFilter)\(s.MagFilter)\(mip)\(s.WrapS)\(s.WrapT)\(s.WrapR)\(compare)\(s.MinLod)\(maxLod)"
-        if let st = samplers[key] { return st }
+        let key = [(s.MinFilter == .linear ? 1 : 0) | (s.MagFilter == .linear ? 2 : 0) | mip << 2 | wrapCode(s.WrapS) << 4
+                   | wrapCode(s.WrapT) << 8 | wrapCode(s.WrapR) << 12 | (compare + 1) << 16,
+                   int(s.MinLod.bitPattern) << 32 | int(maxLod.bitPattern)]
+        if let st = find(samplers, key) { return st }
         let st = gpu.SamplerState.Create(device: device, min: s.MinFilter == .linear ? 1 : 0, mag: s.MagFilter == .linear ? 1 : 0, mip: mip,
                                          s: wrapCode(s.WrapS), t: wrapCode(s.WrapT), r: wrapCode(s.WrapR), compare: compare,
                                          minLod: max(0, s.MinLod), maxLod: max(0, maxLod))
-        if let st = st { samplers[key] = st }
+        if let st = st { samplers.append(keyed(key, st)) }
         return st
     }
 
@@ -315,7 +336,17 @@ final class Metal {
         var order: [uint32] = []
         var indexed = d.Indices != nil
         let restart = d.RestartIndex
-        if let ib = d.Indices {
+        // Lists of 2- or 4-byte indices are read from the device's copy.
+        var deviceIndices: gpu.Buffer<uint8>? = nil
+        if let ib = d.Indices, restart == nil, d.Primitive == .triangles || d.Primitive == .lines || d.Primitive == .points,
+           d.IndexSize == 2 || d.IndexSize == 4, d.IndexOffset % 4 == 0, d.Count > 0,
+           d.IndexOffset + d.Count * d.IndexSize <= ib.Bytes.count {
+            deviceIndices = residentBuffer(ib)
+            if deviceIndices != nil { last = largestIndex(ib, size: d.IndexSize, offset: d.IndexOffset, count: d.Count) }
+        }
+        if deviceIndices != nil {
+            // The device reads them.
+        } else if let ib = d.Indices {
             let n = d.Count
             let size = d.IndexSize
             order.reserveCapacity(n)
@@ -352,7 +383,7 @@ final class Metal {
             order = d.Primitive == .lineLoop ? loopToStrip(order) : fanToList(order)
             primitive = d.Primitive == .lineLoop ? 2 : 3
         }
-        if indexed && order.isEmpty { return true }
+        if indexed && order.isEmpty && deviceIndices == nil { return true }
 
         guard let pass = passFor(target, color: ct, depth: dt) else { return false }
         var slots: [VertexSlot] = []
@@ -362,14 +393,16 @@ final class Metal {
         }
 
         // The pipeline for these formats and this blending.
-        var key = "\(target.Color == nil ? -1 : (target.Color!.Format == .rgba8 ? 0 : 1)),\(target.Depth != nil)"
-        if state.Blend {
-            key += ",b\(state.BlendRGB)\(state.BlendAlpha)\(state.SrcRGB)\(state.DstRGB)\(state.SrcAlpha)\(state.DstAlpha)"
-        }
         let mask = (state.WriteRed ? 8 : 0) | (state.WriteGreen ? 4 : 0) | (state.WriteBlue ? 2 : 0) | (state.WriteAlpha ? 1 : 0)
-        key += ",m\(mask)"
-        for s in slots { key += ";\(s.Format),\(s.Stride),\(s.Step),\(s.Rate)" }
-        var pipeline = g.pipelines[key]
+        var key: [int] = [target.Color == nil ? -1 : (target.Color!.Format == .rgba8 ? 0 : 1), target.Depth != nil ? 1 : 0, mask]
+        if state.Blend {
+            key += [blendOp(state.BlendRGB), blendOp(state.BlendAlpha), blendFactor(state.SrcRGB), blendFactor(state.DstRGB),
+                    blendFactor(state.SrcAlpha), blendFactor(state.DstAlpha)]
+        } else {
+            key += [-1, -1, -1, -1, -1, -1]
+        }
+        for s in slots { key += [s.Format, s.Stride, s.Step, s.Rate] }
+        var pipeline = find(g.pipelines, key)
         if pipeline == nil {
             var pd = gpu.PipelineDescriptor()
             pd.Color = target.Color == nil ? nil : (target.Color!.Format == .rgba8 ? .rgba8 : .rgba32f)
@@ -392,7 +425,7 @@ final class Metal {
                 stats.LastFailure = "\(error)"
                 return false
             }
-            g.pipelines[key] = pipeline!
+            g.pipelines.append(keyed(key, pipeline!))
         }
         pass.SetPipeline(pipeline!)
 
@@ -447,7 +480,10 @@ final class Metal {
             }
         }
 
-        if indexed {
+        if let ib = deviceIndices {
+            pass.DrawIndexed(primitive: primitive, count: d.Count, indexSize: d.IndexSize, buffer: ib, offset: d.IndexOffset,
+                             instances: max(1, d.Instances))
+        } else if indexed {
             order.withUnsafeBufferPointer { p in
                 pass.DrawIndexed(primitive: primitive, count: p.count, indexSize: 4, indices: UnsafeRawPointer(p.baseAddress!),
                                  bytes: p.count * 4, instances: max(1, d.Instances))
@@ -500,6 +536,11 @@ final class Metal {
         let need = lastElement * stride + size * a.Count
         let format = directFormat(a, kind: kind)
         if format >= 0 && a.Offset % 4 == 0 && stride % 4 == 0 && a.Offset + need <= bytes.count {
+            // Big ones stay on the device between draws.
+            if bytes.count > 4096, let dev = residentBuffer(a.Buffer!) {
+                pass.SetBuffer(fragment: false, dev, offset: a.Offset, index: slot)
+                return VertexSlot(Format: format, Stride: stride, Step: step, Rate: a.Divisor > 0 ? a.Divisor : 1)
+            }
             bytes.withUnsafeBufferPointer { p in
                 pass.SetBytes(fragment: false, UnsafeRawPointer(p.baseAddress! + a.Offset), count: need, index: slot)
             }
@@ -515,21 +556,56 @@ final class Metal {
         return VertexSlot(Format: wideFormat(kind), Stride: 16, Step: step, Rate: a.Divisor > 0 ? a.Divisor : 1)
     }
 
+    /// b's device copy, made (again) when it has changed since.
+    func residentBuffer(_ b: Buffer) -> gpu.Buffer<uint8>? {
+        let n = b.Bytes.count
+        if n == 0 { return nil }
+        if let d = b.device, b.deviceVersion == b.Version, d.count == n { return d }
+        // A new one each time, so draws still reading the old one see it whole.
+        guard let d = try? device.CreateBuffer(of: uint8.self, count: n) else { return nil }
+        b.Bytes.withUnsafeBytes { src in
+            UnsafeMutableRawPointer(d._elements).copyMemory(from: src.baseAddress!, byteCount: n)
+        }
+        b.device = d
+        b.deviceVersion = b.Version
+        stats.Uploads += 1
+        return d
+    }
+
+    /// The largest of count indices of `size` bytes from offset in b.
+    func largestIndex(_ b: Buffer, size: int, offset: int, count: int) -> int {
+        let key = [b.Version, size, offset, count]
+        if same(b.maxKey, key) { return b.maxIndex }
+        var m = 0
+        b.Bytes.withUnsafeBytes { p in
+            var at = offset
+            for _ in 0..<count {
+                var v = int(p[at]) | int(p[at + 1]) << 8
+                if size == 4 { v |= int(p[at + 2]) << 16 | int(p[at + 3]) << 24 }
+                if v > m { m = v }
+                at += size
+            }
+        }
+        b.maxKey = key
+        b.maxIndex = m
+        return m
+    }
+
     func depthStencil(_ s: State, hasDepth: bool) -> gpu.DepthStencilState? {
         let compare = hasDepth && s.DepthTest != nil ? compareCode(s.DepthTest!) : 7
         let write = hasDepth && s.DepthTest != nil && s.DepthWrite
         let stencil = hasDepth && s.StencilTest
-        var key = "\(compare),\(write),\(stencil)"
+        var key: [int] = [compare, write ? 1 : 0, stencil ? 1 : 0]
         var front = gpu.StencilDescriptor()
         var back = gpu.StencilDescriptor()
         if stencil {
             front = stencilDescriptor(s.StencilFront)
             back = stencilDescriptor(s.StencilBack)
-            for f in [front, back] { key += ";\(f.Compare),\(f.Fail),\(f.DepthFail),\(f.Pass),\(f.ReadMask),\(f.WriteMask)" }
+            for f in [front, back] { key += [f.Compare, f.Fail, f.DepthFail, f.Pass, f.ReadMask, f.WriteMask] }
         }
-        if let ds = depthStates[key] { return ds }
+        if let ds = find(depthStates, key) { return ds }
         let ds = gpu.DepthStencilState.Create(device: device, compare: compare, write: write, stencil: stencil, front: front, back: back)
-        if let ds = ds { depthStates[key] = ds }
+        if let ds = ds { depthStates.append(keyed(key, ds)) }
         return ds
     }
 
@@ -586,12 +662,13 @@ final class Metal {
             front.Pass = 2   // replace
             front.WriteMask = int(state.StencilFront.WriteMask & 0xFF)
         }
-        let key = "clear,\(wantDepth && depth != nil),\(clearsStencil),\(front.WriteMask)"
-        var ds = depthStates[key]
+        // -1 first: apart from depthStencil's keys, which start with a compare code.
+        let key = [-1, wantDepth && depth != nil ? 1 : 0, clearsStencil ? 1 : 0, front.WriteMask]
+        var ds = find(depthStates, key)
         if ds == nil {
             ds = gpu.DepthStencilState.Create(device: device, compare: 7, write: wantDepth && depth != nil, stencil: clearsStencil, front: front, back: front)
             if ds == nil { return false }
-            depthStates[key] = ds!
+            depthStates.append(keyed(key, ds!))
         }
         pass.SetDepthStencil(ds!, front: (stencil ?? 0) & 0xFF, back: (stencil ?? 0) & 0xFF)
         let c = color ?? Color()
@@ -792,4 +869,28 @@ func stencilDescriptor(_ f: StencilFace) -> gpu.StencilDescriptor {
     s.ReadMask = int(f.ReadMask & 0xFF)
     s.WriteMask = int(f.WriteMask & 0xFF)
     return s
+}
+
+// keyed is a cached state and the integers that say what it was made for.
+struct keyed<T> {
+    let key: [int]
+    let value: T
+
+    init(_ key: [int], _ value: T) {
+        self.key = key
+        self.value = value
+    }
+}
+
+// find is the cached value made for key, if any.
+func find<T>(_ list: [keyed<T>], _ key: [int]) -> T? {
+    for e in list where same(e.key, key) { return e.value }
+    return nil
+}
+
+// same is whether two keys are equal, element by element.
+func same(_ a: [int], _ b: [int]) -> bool {
+    if a.count != b.count { return false }
+    for i in 0..<a.count where a[i] != b[i] { return false }
+    return true
 }

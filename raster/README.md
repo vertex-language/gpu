@@ -22,6 +22,7 @@ r.Draw(draw, program: program, state: state, target: target, textures: bindings)
 - **`Target`** (class): A color image and a depth-stencil image. `FlipY` stores GL's bottom row last, as a window shows it.
 - **`Texture`** (class), **`Level`** (class), **`Format`**: 2D and cube images with mip levels: `rgba8`, `rgba32f`, `depthStencil`; storage each level owns, read and written in place. `GenerateMipmaps`, `Complete`, `MipmapComplete`. With the GPU on, a texture also has a device copy: read levels through `Read(face:level:)` and write them through `Write(face:level:)` (or `Define`), and the two copies stay in step.
 - **`EnableGPU`**, **`GPUEnabled`**, **`GPUCounters`** (`GPUStats`), **`FlushGPU`**: The GPU path, and what it has done (draws, clears, uploads, readbacks, and draws that fell back to the CPU).
+- **`GPUDevice`**, **`Texture.OnDevice()`**: The device renderers draw on, and a texture's copy there with what was drawn into it submitted: a target to present in a window (`gpu.Layer`) without reading it back.
 - **`Sampler`** (struct), **`Binding`** (struct), **`Filter`**, **`Wrap`**, **`Swizzle`**, **`CompareFunc`**: How a texture is read.
 
 ## How it draws
