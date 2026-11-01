@@ -119,13 +119,14 @@ func reference(_ a: neural.Activation, _ x: float64) -> float64 {
     case .Tanh: return cTanh(x)
     case .Exp: return cExp(x)
     case .Sin: return cSin(x)
+    case .ReLUSquared: return x > 0 ? x * x : 0
     }
 }
 
 do {
     let x = matrix(50000, 8)
     let gate = matrix(50000, 8)
-    for (a, ulps) in [(neural.Activation.ReLU, 0), (.GELU, 8), (.GELUTanh, 8), (.SiLU, 8), (.Sigmoid, 4), (.Tanh, 4), (.Exp, 2), (.Sin, 3)] {
+    for (a, ulps) in [(neural.Activation.ReLU, 0), (.GELU, 8), (.GELUTanh, 8), (.SiLU, 8), (.Sigmoid, 4), (.Tanh, 4), (.Exp, 2), (.Sin, 3), (.ReLUSquared, 0)] {
         let want = x.map { reference(a, float64($0)) }
         var gated: [float64] = []
         for i in 0..<x.count { gated.append(float64(x[i]) * reference(a, float64(gate[i]))) }
