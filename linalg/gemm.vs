@@ -15,8 +15,8 @@ import (
     "gpu/dtype"
 )
 
-@inlinable public func _gemmBlockKernel<B: dtype.Block>(_ f: B, _ w: gpu.Span<uint8>, _ x: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>,
-                                                         _ m: int, _ n: int, _ k: int, _ ldy: int, _ col0: int, _ accumulate: bool) kernel {
+@inlinable public func _gemmBlockKernel<B: dtype.Block>(f: B, w: gpu.Span<uint8>, x: gpu.Span<float32>, y: gpu.MutableSpan<float32>,
+                                                         m: int, n: int, k: int, ldy: int, col0: int, accumulate: bool) kernel {
     let ws = gpu.Shared<float32>(count: 1056)  // 32 weight rows x 33: a column read is no bank conflict
     let xs = gpu.Shared<float32>(count: 1056)  // 32 tokens x 33
     let t = gpu.LocalIndex.x
@@ -74,8 +74,8 @@ import (
 }
 
 /// _gemmStore writes four columns of one token's row of Y, those inside it.
-@inlinable public func _gemmStore(_ y: gpu.MutableSpan<float32>, _ tok: int, _ col: int, _ m: int, _ n: int, _ ldy: int, _ col0: int,
-                                  _ accumulate: bool, _ v0: float32, _ v1: float32, _ v2: float32, _ v3: float32) {
+@inlinable public func _gemmStore(y: gpu.MutableSpan<float32>, tok: int, col: int, m: int, n: int, ldy: int, col0: int,
+                                  accumulate: bool, v0: float32, v1: float32, v2: float32, v3: float32) {
     if tok >= n {
         return
     }
@@ -90,7 +90,7 @@ import (
 /// floats (n tokens), W is m rows of k in the format -- a GGUF tensor's
 /// bytes as they are -- and Y is n rows of m. With accumulate, Y = X·Wᵀ + Y:
 /// a residual added in the same pass. A linear layer over n tokens.
-@inlinable public func Gemm<B: dtype.Block>(_ w: gpu.Buffer<uint8>, _ format: B, _ x: gpu.Buffer<float32>, into y: gpu.Buffer<float32>,
+@inlinable public func Gemm<B: dtype.Block>(w: gpu.Buffer<uint8>, format: B, x: gpu.Buffer<float32>, into y: gpu.Buffer<float32>,
                                             m: int, n: int, k: int, accumulate: bool = false) async throws {
     try await Gemm([w], rows: [m], format, x, into: y, n: n, k: k, accumulate: accumulate)
 }
@@ -101,7 +101,7 @@ import (
 /// floats apart (0: the parts' rows, packed), and the outputs start at
 /// column: so several Gemms of different formats fill one row side by
 /// side.
-@inlinable public func Gemm<B: dtype.Block>(_ parts: [gpu.Buffer<uint8>], rows: [int], _ format: B, _ x: gpu.Buffer<float32>,
+@inlinable public func Gemm<B: dtype.Block>(parts: [gpu.Buffer<uint8>], rows: [int], format: B, x: gpu.Buffer<float32>,
                                             into y: gpu.Buffer<float32>, n: int, k: int, accumulate: bool = false,
                                             stride: int = 0, column: int = 0) async throws {
     if k % B.Size() != 0 {
@@ -133,9 +133,9 @@ import (
 
 // ---- indexed products: a mixture of experts ----
 
-@inlinable public func _gemvIdsKernel<B: dtype.Block>(_ f: B, _ w: gpu.Span<uint8>, _ ids: gpu.Span<int32>, _ x: gpu.Span<float32>,
-                                                       _ y: gpu.MutableSpan<float32>, _ m: int, _ k: int, _ experts: int, _ items: int,
-                                                       _ xShared: int, _ per: int) kernel {
+@inlinable public func _gemvIdsKernel<B: dtype.Block>(f: B, w: gpu.Span<uint8>, ids: gpu.Span<int32>, x: gpu.Span<float32>,
+                                                       y: gpu.MutableSpan<float32>, m: int, k: int, experts: int, items: int,
+                                                       xShared: int, per: int) kernel {
     // Row `row` (x, a wave's lanes per row as Gemv takes them) of item i
     // (y): the row of expert ids[i]'s weight -- experts of m rows of k,
     // one after another -- dotted with x's row i, or with xShared > 1 the
@@ -171,7 +171,7 @@ import (
 /// them. With xShared, items share x's rows that many at a time (item i
 /// reads row i / xShared): a token's input, read by each of the experts
 /// chosen for it. An id outside the experts is expert 0.
-@inlinable public func GemvIds<B: dtype.Block>(_ w: gpu.Buffer<uint8>, _ format: B, ids: gpu.Buffer<int32>, _ x: gpu.Buffer<float32>,
+@inlinable public func GemvIds<B: dtype.Block>(w: gpu.Buffer<uint8>, format: B, ids: gpu.Buffer<int32>, x: gpu.Buffer<float32>,
                                                into y: gpu.Buffer<float32>, m: int, k: int, experts: int, items: int,
                                                xShared: int = 1) async throws {
     if k % B.Size() != 0 {

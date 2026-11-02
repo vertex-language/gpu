@@ -5,7 +5,7 @@ import (
     "gpu"
 )
 
-func _splitHeads(_ x: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>, _ rows: int, _ heads: int, _ dim: int) kernel {
+func _splitHeads(x: gpu.Span<float32>, y: gpu.MutableSpan<float32>, rows: int, heads: int, dim: int) kernel {
     let i = gpu.Index.x
     if i >= rows * heads * dim {
         return
@@ -18,7 +18,7 @@ func _splitHeads(_ x: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>, _ rows: 
     y[i] = x[r * heads * dim + h * dim + e]
 }
 
-func _mergeHeads(_ x: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>, _ rows: int, _ heads: int, _ dim: int) kernel {
+func _mergeHeads(x: gpu.Span<float32>, y: gpu.MutableSpan<float32>, rows: int, heads: int, dim: int) kernel {
     let i = gpu.Index.x
     if i >= rows * heads * dim {
         return
@@ -34,7 +34,7 @@ func _mergeHeads(_ x: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>, _ rows: 
 /// SplitHeads writes x, rows x (heads · dim) -- a projection's output,
 /// each row's heads side by side -- into y as heads x rows x dim, the
 /// layout attention takes.
-public func SplitHeads(_ x: gpu.Buffer<float32>, into y: gpu.Buffer<float32>, rows: int, heads: int, dim: int) async throws {
+public func SplitHeads(x: gpu.Buffer<float32>, into y: gpu.Buffer<float32>, rows: int, heads: int, dim: int) async throws {
     if rows * heads * dim == 0 {
         return
     }
@@ -43,14 +43,14 @@ public func SplitHeads(_ x: gpu.Buffer<float32>, into y: gpu.Buffer<float32>, ro
 
 /// MergeHeads is SplitHeads undone: heads x rows x dim into rows x
 /// (heads · dim).
-public func MergeHeads(_ x: gpu.Buffer<float32>, into y: gpu.Buffer<float32>, rows: int, heads: int, dim: int) async throws {
+public func MergeHeads(x: gpu.Buffer<float32>, into y: gpu.Buffer<float32>, rows: int, heads: int, dim: int) async throws {
     if rows * heads * dim == 0 {
         return
     }
     try await _mergeHeads.Launch(x, y, rows, heads, dim, over: rows * heads * dim)
 }
 
-func _gatherColumns(_ x: gpu.Span<float32>, _ index: gpu.Span<int32>, _ y: gpu.MutableSpan<float32>, _ rows: int, _ cols: int, _ out: int) kernel {
+func _gatherColumns(x: gpu.Span<float32>, index: gpu.Span<int32>, y: gpu.MutableSpan<float32>, rows: int, cols: int, out: int) kernel {
     let i = gpu.Index.x
     if i >= rows * out {
         return
@@ -64,7 +64,7 @@ func _gatherColumns(_ x: gpu.Span<float32>, _ index: gpu.Span<int32>, _ y: gpu.M
 /// index of out columns: x times a one-hot alignment matrix, taken
 /// without one -- a duration model's token features, each repeated for
 /// its frames.
-public func GatherColumns(_ x: gpu.Buffer<float32>, index: gpu.Buffer<int32>, into y: gpu.Buffer<float32>, rows: int, cols: int) async throws {
+public func GatherColumns(x: gpu.Buffer<float32>, index: gpu.Buffer<int32>, into y: gpu.Buffer<float32>, rows: int, cols: int) async throws {
     let out = index.count
     if rows * out == 0 {
         return

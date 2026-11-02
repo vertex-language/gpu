@@ -8,19 +8,19 @@ import (
 
 var rng = gputest.Random(seed: 1)
 
-func floats(_ n: int) -> [float32] {
+func floats(n: int) -> [float32] {
     var out: [float32] = []
     for _ in 0..<n { out.append(rng.Float32()) }
     return out
 }
 
-func ints(_ n: int) -> [int32] {
+func ints(n: int) -> [int32] {
     var out: [int32] = []
     for _ in 0..<n { out.append(rng.Int32() >> 4) }
     return out
 }
 
-func uints(_ n: int) -> [uint32] {
+func uints(n: int) -> [uint32] {
     var out: [uint32] = []
     for _ in 0..<n { out.append(rng.Uint32()) }
     return out
@@ -28,7 +28,7 @@ func uints(_ n: int) -> [uint32] {
 
 // ---- group-scope device functions, called from a kernel in this module ----
 
-func groupOps(_ x: gpu.Span<int32>, _ sum: gpu.MutableSpan<int32>, _ inc: gpu.MutableSpan<int32>, _ ex: gpu.MutableSpan<int32>, _ mn: gpu.MutableSpan<int32>, _ mx: gpu.MutableSpan<int32>) kernel {
+func groupOps(x: gpu.Span<int32>, sum: gpu.MutableSpan<int32>, inc: gpu.MutableSpan<int32>, ex: gpu.MutableSpan<int32>, mn: gpu.MutableSpan<int32>, mx: gpu.MutableSpan<int32>) kernel {
     let i = gpu.Index.x
     let v = x[i]
     sum[i] = parallel.GroupSum(v)
@@ -125,7 +125,7 @@ for n in gputest.Sizes {
 // host sort: the keys ascend; the values are the original positions,
 // each once; each key is the one that started at its value's position;
 // and equal keys keep the order they came in.
-func sortProblem(_ order: [uint64], _ keys: [uint64], _ values: [uint32]) -> string {
+func sortProblem(order: [uint64], keys: [uint64], values: [uint32]) -> string {
     let n = order.count
     if keys.count != n || values.count != n { return "counts differ" }
     var seen = [bool](repeating: false, count: n)
@@ -144,7 +144,7 @@ func sortProblem(_ order: [uint64], _ keys: [uint64], _ values: [uint32]) -> str
     return ""
 }
 
-func floatOrder(_ f: float32) -> uint64 {
+func floatOrder(f: float32) -> uint64 {
     let b = f.bitPattern
     return uint64((b & 0x80000000) != 0 ? ~b : (b | 0x80000000))
 }
@@ -189,7 +189,7 @@ for n in gputest.Sizes {
 
 // ---- Count, Select, SelectIndices ----
 
-func keeps(_ x: float64, _ w: parallel.Where) -> bool {
+func keeps(x: float64, w: parallel.Where) -> bool {
     switch w {
     case .Less(let v): return x < v
     case .LessEqual(let v): return x <= v
@@ -278,7 +278,7 @@ for n in gputest.Sizes {
 // ---- TopK ----
 
 // The host's top k: stable, largest first, ties to the earlier position.
-func hostTop(_ xs: [float32], _ k: int) -> [uint32] {
+func hostTop(xs: [float32], k: int) -> [uint32] {
     var top: [uint32] = []
     for i in 0..<xs.count {
         var at = top.count
@@ -311,7 +311,7 @@ for n in gputest.Sizes {
 // at every step, so a sum or scan is checked against the CPU device's,
 // which adds in the same tree; min, max, select and sort are exact; and a
 // scatter-add adds small whole numbers, exact in any order.
-func halves<T: dtype.Number>(_ name: string, _ t: T.Type) async throws {
+func halves<T: dtype.Number>(name: string, t: T.Type) async throws {
     for n in gputest.Sizes {
         let xs = floats(n).map { T.FromFloat64(float64($0) * 8 - 4) }
         var lo = T.Highest(), hi = T.Lowest()

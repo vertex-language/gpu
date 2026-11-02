@@ -6,18 +6,18 @@ import (
     "gpu/neural"
 )
 
-@_silgen_name("exp") func cExp(_ x: float64) -> float64
-@_silgen_name("log") func cLog(_ x: float64) -> float64
-@_silgen_name("erf") func cErf(_ x: float64) -> float64
-@_silgen_name("erfc") func cErfc(_ x: float64) -> float64
-@_silgen_name("tanh") func cTanh(_ x: float64) -> float64
-@_silgen_name("cos") func cCos(_ x: float64) -> float64
-@_silgen_name("sin") func cSin(_ x: float64) -> float64
-@_silgen_name("pow") func cPow(_ x: float64, _ y: float64) -> float64
+@_silgen_name("exp") func cExp(x: float64) -> float64
+@_silgen_name("log") func cLog(x: float64) -> float64
+@_silgen_name("erf") func cErf(x: float64) -> float64
+@_silgen_name("erfc") func cErfc(x: float64) -> float64
+@_silgen_name("tanh") func cTanh(x: float64) -> float64
+@_silgen_name("cos") func cCos(x: float64) -> float64
+@_silgen_name("sin") func cSin(x: float64) -> float64
+@_silgen_name("pow") func cPow(x: float64, y: float64) -> float64
 
 var rng = gputest.Random(seed: 11)
 
-func matrix(_ n: int, _ scale: float32) -> [float32] {
+func matrix(n: int, scale: float32) -> [float32] {
     var out: [float32] = []
     for _ in 0..<n { out.append(rng.Float32() * scale) }
     return out
@@ -25,14 +25,14 @@ func matrix(_ n: int, _ scale: float32) -> [float32] {
 
 // Each check: the host reference within ulps, and the CPU device's bits on
 // every other device.
-func compare(_ what: string, _ got: [(gpu.Device, [float32])], _ want: [float64], ulps: int, crossUlps: int = 1) {
+func compare(what: string, got: [(gpu.Device, [float32])], want: [float64], ulps: int, crossUlps: int = 1) {
     for (d, g) in got {
         gputest.Close(what, d, g, want.map { float32($0) }, ulps: ulps)
         if !d.IsCPU { gputest.Close(what + " vs cpu", d, g, got[0].1, ulps: crossUlps) }
     }
 }
 
-func compareNear(_ what: string, _ got: [(gpu.Device, [float32])], _ want: [float64], _ bound: [float64]) {
+func compareNear(what: string, got: [(gpu.Device, [float32])], want: [float64], bound: [float64]) {
     for (d, g) in got {
         gputest.Near(what, d, g, want, bound: bound.map { $0 + 1e-38 })
         if !d.IsCPU { gputest.Close(what + " vs cpu", d, g, got[0].1, ulps: 1) }
@@ -107,7 +107,7 @@ for (rows, cols) in [(1, 1), (3, 7), (4, 256), (5, 1000), (2, 5000)] {
 }
 
 // Activations, elementwise, against libm.
-func reference(_ a: neural.Activation, _ x: float64) -> float64 {
+func reference(a: neural.Activation, x: float64) -> float64 {
     switch a {
     case .ReLU: return x > 0 ? x : 0
     // In float64 too, 1 + erf and 1 + tanh cancel in the tail: the

@@ -44,7 +44,7 @@ public enum Where {
     /// _bounds is the comparison for an integer type whose values run
     /// from lo to hi: an operator and an integral value in that range, or
     /// 6 (always) or 7 (never) where the value is outside it.
-    public func _bounds(_ lo: float64, _ hi: float64) -> (int32, float64) {
+    public func _bounds(lo: float64, hi: float64) -> (int32, float64) {
         let v = _value
         let up = v.rounded(.up)
         let down = v.rounded(.down)
@@ -66,7 +66,7 @@ public enum Where {
 }
 
 /// _op is w as an operator and a value of T.
-@inlinable public func _op<T: dtype.Number>(_ w: Where, _ of: T.Type) -> (int32, T) {
+@inlinable public func _op<T: dtype.Number>(w: Where, of: T.Type) -> (int32, T) {
     if T.IsInteger() {
         let (op, v) = w._bounds(T.ToFloat64(T.Lowest()), T.ToFloat64(T.Highest()))
         return (op, T.FromFloat64(v))
@@ -74,7 +74,7 @@ public enum Where {
     return (w._code, T.FromFloat64(w._value))
 }
 
-@inlinable public func _keeps<T: dtype.Number>(_ x: T, _ op: int32, _ v: T) -> bool {
+@inlinable public func _keeps<T: dtype.Number>(x: T, op: int32, v: T) -> bool {
     if op == 0 { return x < v }
     if op == 1 { return x <= v }
     if op == 2 { return x > v }
@@ -84,14 +84,14 @@ public enum Where {
     return op == 6
 }
 
-@inlinable public func _flag<T: dtype.Number>(_ x: gpu.Span<T>, _ flags: gpu.MutableSpan<uint32>, _ op: int32, _ v: T) kernel {
+@inlinable public func _flag<T: dtype.Number>(x: gpu.Span<T>, flags: gpu.MutableSpan<uint32>, op: int32, v: T) kernel {
     let i = gpu.Index.x
     if i < x.count {
         flags[i] = _keeps(x[i], op, v) ? 1 : 0
     }
 }
 
-@inlinable public func _compact<T: dtype.Number>(_ x: gpu.Span<T>, _ at: gpu.Span<uint32>, _ out: gpu.MutableSpan<T>, _ indices: gpu.MutableSpan<uint32>, _ op: int32, _ v: T, _ values: bool) kernel {
+@inlinable public func _compact<T: dtype.Number>(x: gpu.Span<T>, at: gpu.Span<uint32>, out: gpu.MutableSpan<T>, indices: gpu.MutableSpan<uint32>, op: int32, v: T, values: bool) kernel {
     let i = gpu.Index.x
     if i < x.count && _keeps(x[i], op, v) {
         if values {
@@ -103,7 +103,7 @@ public enum Where {
 }
 
 /// _where is where each kept element of b goes, and how many there are.
-@inlinable public func _where<T: dtype.Number>(_ b: gpu.Buffer<T>, _ op: int32, _ v: T) async throws -> (gpu.Buffer<uint32>, int) {
+@inlinable public func _where<T: dtype.Number>(b: gpu.Buffer<T>, op: int32, v: T) async throws -> (gpu.Buffer<uint32>, int) {
     let flags = try await b.Device.CreateBuffer(of: uint32.self, count: b.count)
     try await _flag.Launch(b, flags, op, v, over: b.count)
     let kept = int(try await Reduce(flags, .Sum))
@@ -112,7 +112,7 @@ public enum Where {
 }
 
 /// Count is how many elements of b satisfy w.
-@inlinable public func Count<T: dtype.Number>(_ b: gpu.Buffer<T>, where w: Where) async throws -> int {
+@inlinable public func Count<T: dtype.Number>(b: gpu.Buffer<T>, where w: Where) async throws -> int {
     if b.count == 0 {
         return 0
     }
@@ -123,7 +123,7 @@ public enum Where {
 }
 
 /// Select is the elements of b that satisfy w, in their order in b.
-@inlinable public func Select<T: dtype.Number>(_ b: gpu.Buffer<T>, where w: Where) async throws -> gpu.Buffer<T> {
+@inlinable public func Select<T: dtype.Number>(b: gpu.Buffer<T>, where w: Where) async throws -> gpu.Buffer<T> {
     if b.count == 0 {
         return try await b.Device.CreateBuffer(of: T.self, count: 0)
     }
@@ -138,7 +138,7 @@ public enum Where {
 
 /// SelectIndices is where in b the elements that satisfy w are, in
 /// ascending order.
-@inlinable public func SelectIndices<T: dtype.Number>(_ b: gpu.Buffer<T>, where w: Where) async throws -> gpu.Buffer<uint32> {
+@inlinable public func SelectIndices<T: dtype.Number>(b: gpu.Buffer<T>, where w: Where) async throws -> gpu.Buffer<uint32> {
     if b.count == 0 {
         return try await b.Device.CreateBuffer(of: uint32.self, count: 0)
     }

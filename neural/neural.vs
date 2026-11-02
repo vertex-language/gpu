@@ -17,7 +17,7 @@ public let RowGroup = 256
 
 // ---- softmax ----
 
-func _softmaxRows(_ x: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>, _ cols: int, _ log: bool) kernel {
+func _softmaxRows(x: gpu.Span<float32>, y: gpu.MutableSpan<float32>, cols: int, log: bool) kernel {
     let row = gpu.GroupIndex.x
     let me = parallel.GroupRank()
     let step = parallel.GroupCount()
@@ -48,18 +48,18 @@ func _softmaxRows(_ x: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>, _ cols:
 /// Softmax writes each row of x (rows x cols, row-major) as its softmax
 /// into y: e^x / Σe^x, computed from x minus the row's greatest element so
 /// that nothing overflows.
-public func Softmax(_ x: gpu.Buffer<float32>, into y: gpu.Buffer<float32>, rows: int, cols: int) async throws {
+public func Softmax(x: gpu.Buffer<float32>, into y: gpu.Buffer<float32>, rows: int, cols: int) async throws {
     if rows == 0 || cols == 0 { return }
     try await _softmaxRows.Launch(x, y, cols, false, over: rows * 256, workgroup: 256)
 }
 
 /// LogSoftmax writes each row's log-softmax: x - max - log Σe^(x - max).
-public func LogSoftmax(_ x: gpu.Buffer<float32>, into y: gpu.Buffer<float32>, rows: int, cols: int) async throws {
+public func LogSoftmax(x: gpu.Buffer<float32>, into y: gpu.Buffer<float32>, rows: int, cols: int) async throws {
     if rows == 0 || cols == 0 { return }
     try await _softmaxRows.Launch(x, y, cols, true, over: rows * 256, workgroup: 256)
 }
 
-func _logSumExpRows(_ x: gpu.Span<float32>, _ out: gpu.MutableSpan<float32>, _ cols: int) kernel {
+func _logSumExpRows(x: gpu.Span<float32>, out: gpu.MutableSpan<float32>, cols: int) kernel {
     let row = gpu.GroupIndex.x
     let me = parallel.GroupRank()
     let step = parallel.GroupCount()
@@ -84,7 +84,7 @@ func _logSumExpRows(_ x: gpu.Span<float32>, _ out: gpu.MutableSpan<float32>, _ c
 }
 
 /// LogSumExp is log Σ e^x of each row, one value a row.
-public func LogSumExp(_ x: gpu.Buffer<float32>, rows: int, cols: int) async throws -> gpu.Buffer<float32> {
+public func LogSumExp(x: gpu.Buffer<float32>, rows: int, cols: int) async throws -> gpu.Buffer<float32> {
     let out = try await x.Device.CreateBuffer(of: float32.self, count: rows)
     if rows > 0 && cols > 0 {
         try await _logSumExpRows.Launch(x, out, cols, over: rows * 256, workgroup: 256)
@@ -96,7 +96,7 @@ public func LogSumExp(_ x: gpu.Buffer<float32>, rows: int, cols: int) async thro
 
 /// _argmaxLanes is the greater of each lane's (v, at) and its partner's
 /// across the wave, the lower index of equals.
-@inlinable func _argmaxLanes(_ v: float32, _ at: int) -> (float32, int) {
+@inlinable func _argmaxLanes(v: float32, at: int) -> (float32, int) {
     var bv = v, bi = at
     var m = gpu.Wave.Size >> 1
     while m > 0 {
@@ -111,7 +111,7 @@ public func LogSumExp(_ x: gpu.Buffer<float32>, rows: int, cols: int) async thro
     return (bv, bi)
 }
 
-func _argmaxRows(_ x: gpu.Span<float32>, _ out: gpu.MutableSpan<int32>, _ cols: int) kernel {
+func _argmaxRows(x: gpu.Span<float32>, out: gpu.MutableSpan<int32>, cols: int) kernel {
     // A group a row: 32 waves of 32 on a GPU, one work-item on the CPU.
     // Each work-item keeps the first greatest of its strided share, the
     // lanes of a wave meet by shuffles, and the waves in shared storage.
@@ -152,7 +152,7 @@ func _argmaxRows(_ x: gpu.Span<float32>, _ out: gpu.MutableSpan<int32>, _ cols: 
 /// Argmax writes each row's index of its greatest element into out, the
 /// first of equals; a row with nothing greater than -inf (or only NaNs)
 /// gets 0. Greedy decoding's next token without reading the logits back.
-public func Argmax(_ x: gpu.Buffer<float32>, into out: gpu.Buffer<int32>, rows: int, cols: int) async throws {
+public func Argmax(x: gpu.Buffer<float32>, into out: gpu.Buffer<int32>, rows: int, cols: int) async throws {
     if rows == 0 || cols == 0 { return }
     if x.count < rows * cols || out.count < rows || cols >= 1 << 31 {
         throw gpu.DeviceError.badCount
@@ -163,7 +163,7 @@ public func Argmax(_ x: gpu.Buffer<float32>, into out: gpu.Buffer<int32>, rows: 
 
 // ---- normalization ----
 
-func _rmsNormRows(_ x: gpu.Span<float32>, _ w: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>, _ cols: int, _ eps: float32) kernel {
+func _rmsNormRows(x: gpu.Span<float32>, w: gpu.Span<float32>, y: gpu.MutableSpan<float32>, cols: int, eps: float32) kernel {
     let row = gpu.GroupIndex.x
     let me = parallel.GroupRank()
     let step = parallel.GroupCount()
@@ -183,7 +183,7 @@ func _rmsNormRows(_ x: gpu.Span<float32>, _ w: gpu.Span<float32>, _ y: gpu.Mutab
     }
 }
 
-func _rmsNormWaves(_ x: gpu.Span<float32>, _ w: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>, _ cols: int, _ eps: float32, _ waves: int) kernel {
+func _rmsNormWaves(x: gpu.Span<float32>, w: gpu.Span<float32>, y: gpu.MutableSpan<float32>, cols: int, eps: float32, waves: int) kernel {
     // A row takes `waves` waves of 32 lanes. Each lane squares a strided
     // share of it, read unchecked (RMSNorm checked the counts), and a wave
     // adds its lanes by shuffles; only with more than one wave do their
@@ -224,7 +224,7 @@ func _rmsNormWaves(_ x: gpu.Span<float32>, _ w: gpu.Span<float32>, _ y: gpu.Muta
 
 /// RMSNorm writes each row of x scaled to unit root-mean-square and then
 /// by weight (cols elements): y = x / sqrt(mean(x²) + eps) · weight.
-public func RMSNorm(_ x: gpu.Buffer<float32>, weight: gpu.Buffer<float32>, into y: gpu.Buffer<float32>, rows: int, cols: int, eps: float32 = 1e-6) async throws {
+public func RMSNorm(x: gpu.Buffer<float32>, weight: gpu.Buffer<float32>, into y: gpu.Buffer<float32>, rows: int, cols: int, eps: float32 = 1e-6) async throws {
     if rows == 0 || cols == 0 { return }
     if y.Device.WaveSize == 32 {
         if x.count < rows * cols || y.count < rows * cols || weight.count < cols {
@@ -240,7 +240,7 @@ public func RMSNorm(_ x: gpu.Buffer<float32>, weight: gpu.Buffer<float32>, into 
     try await _rmsNormRows.Launch(x, weight, y, cols, eps, over: rows * 256, workgroup: 256)
 }
 
-func _layerNormRows(_ x: gpu.Span<float32>, _ w: gpu.Span<float32>, _ b: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>, _ cols: int, _ eps: float32) kernel {
+func _layerNormRows(x: gpu.Span<float32>, w: gpu.Span<float32>, b: gpu.Span<float32>, y: gpu.MutableSpan<float32>, cols: int, eps: float32) kernel {
     let row = gpu.GroupIndex.x
     let me = parallel.GroupRank()
     let step = parallel.GroupCount()
@@ -271,7 +271,7 @@ func _layerNormRows(_ x: gpu.Span<float32>, _ w: gpu.Span<float32>, _ b: gpu.Spa
 /// LayerNorm writes each row of x normalized to zero mean and unit
 /// variance, then scaled and shifted: y = (x - mean) / sqrt(var + eps) ·
 /// weight + bias.
-public func LayerNorm(_ x: gpu.Buffer<float32>, weight: gpu.Buffer<float32>, bias: gpu.Buffer<float32>, into y: gpu.Buffer<float32>, rows: int, cols: int, eps: float32 = 1e-5) async throws {
+public func LayerNorm(x: gpu.Buffer<float32>, weight: gpu.Buffer<float32>, bias: gpu.Buffer<float32>, into y: gpu.Buffer<float32>, rows: int, cols: int, eps: float32 = 1e-5) async throws {
     if rows == 0 || cols == 0 { return }
     try await _layerNormRows.Launch(x, weight, bias, y, cols, eps, over: rows * 256, workgroup: 256)
 }
@@ -308,7 +308,7 @@ public enum Activation {
 }
 
 /// Apply is activation a of x, as a device function any kernel can call.
-@inlinable public func Apply(_ a: int32, _ x: float32) -> float32 {
+@inlinable public func Apply(a: int32, x: float32) -> float32 {
     if a == 0 { return x > 0 ? x : 0 }
     // 1 + erf(x/√2) is erfc(-x/√2), and 1 + tanh(z) is 2·sigmoid(2z):
     // the same functions, without the cancellation both sums have for
@@ -323,14 +323,14 @@ public enum Activation {
     return math.Tanh(x)
 }
 
-func _activate(_ x: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>, _ a: int32) kernel {
+func _activate(x: gpu.Span<float32>, y: gpu.MutableSpan<float32>, a: int32) kernel {
     let i = gpu.Index.x
     if i < x.count {
         y[i] = Apply(a, x[i])
     }
 }
 
-func _gated(_ x: gpu.Span<float32>, _ gate: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>, _ a: int32) kernel {
+func _gated(x: gpu.Span<float32>, gate: gpu.Span<float32>, y: gpu.MutableSpan<float32>, a: int32) kernel {
     let i = gpu.Index.x
     if i < x.count {
         y[i] = x[i] * Apply(a, gate[i])
@@ -340,14 +340,14 @@ func _gated(_ x: gpu.Span<float32>, _ gate: gpu.Span<float32>, _ y: gpu.MutableS
 /// Activate writes a(x) into y, element by element: .ReLU, .GELU (with
 /// erf), .GELUTanh (the tanh approximation), .SiLU, .Sigmoid, .Tanh, and
 /// .Exp and .Sin (a vocoder's magnitude and phase).
-public func Activate(_ x: gpu.Buffer<float32>, _ a: Activation, into y: gpu.Buffer<float32>) async throws {
+public func Activate(x: gpu.Buffer<float32>, a: Activation, into y: gpu.Buffer<float32>) async throws {
     if x.count == 0 { return }
     try await _activate.Launch(x, y, a._code, over: x.count)
 }
 
 /// Gated writes x · a(gate) into y: SwiGLU is Gated(up, gate, .SiLU),
 /// GeGLU is Gated(up, gate, .GELU).
-public func Gated(_ x: gpu.Buffer<float32>, gate: gpu.Buffer<float32>, _ a: Activation, into y: gpu.Buffer<float32>) async throws {
+public func Gated(x: gpu.Buffer<float32>, gate: gpu.Buffer<float32>, a: Activation, into y: gpu.Buffer<float32>) async throws {
     if x.count == 0 { return }
     try await _gated.Launch(x, gate, y, a._code, over: x.count)
 }
@@ -370,7 +370,7 @@ public enum RopeLayout: Equatable {
 
 // ropeTurn rotates pair p of the head starting at head by angle position ·
 // base^(-2p/dim), in the layout halves says (0 interleaved, 1 halves).
-func ropeTurn(_ x: gpu.MutableSpan<float32>, _ head: int, _ p: int, _ dim: int, _ position: int, _ base: float32, _ halves: int) {
+func ropeTurn(x: gpu.MutableSpan<float32>, head: int, p: int, dim: int, position: int, base: float32, halves: int) {
     let freq = math.Exp2(-float32(2 * p) / float32(dim) * math.Log2(base))
     let angle = float32(position) * freq
     let c = math.Cos(angle)
@@ -387,7 +387,7 @@ func ropeTurn(_ x: gpu.MutableSpan<float32>, _ head: int, _ p: int, _ dim: int, 
     x[ib] = a * s + b * c
 }
 
-func _rope(_ x: gpu.MutableSpan<float32>, _ positions: gpu.Span<int32>, _ heads: int, _ dim: int, _ base: float32, _ halves: int) kernel {
+func _rope(x: gpu.MutableSpan<float32>, positions: gpu.Span<int32>, heads: int, dim: int, base: float32, halves: int) kernel {
     // One work-item a pair: token t, head h, pair p.
     let i = gpu.Index.x
     let pairs = dim / 2
@@ -398,7 +398,7 @@ func _rope(_ x: gpu.MutableSpan<float32>, _ positions: gpu.Span<int32>, _ heads:
     ropeTurn(x, (i / pairs) * dim, p, dim, int(positions[t]), base, halves)
 }
 
-func _ropeAt(_ x: gpu.MutableSpan<float32>, _ position: int, _ heads: int, _ dim: int, _ base: float32, _ halves: int) kernel {
+func _ropeAt(x: gpu.MutableSpan<float32>, position: int, heads: int, dim: int, base: float32, halves: int) kernel {
     // _rope for one token, its position a scalar: what decoding a token
     // needs, with no buffer for the host to write.
     let i = gpu.Index.x
@@ -409,7 +409,7 @@ func _ropeAt(_ x: gpu.MutableSpan<float32>, _ position: int, _ heads: int, _ dim
 
 /// RoPE rotates one token's heads in place (heads x dim), all at position:
 /// RoPE(x, positions:) for a single token, the position passed as a value.
-public func RoPE(_ x: gpu.Buffer<float32>, position: int, heads: int, dim: int, base: float32 = 10000,
+public func RoPE(x: gpu.Buffer<float32>, position: int, heads: int, dim: int, base: float32 = 10000,
                  layout: RopeLayout = .interleaved) async throws {
     let total = heads * (dim / 2)
     if total == 0 { return }
@@ -419,7 +419,7 @@ public func RoPE(_ x: gpu.Buffer<float32>, position: int, heads: int, dim: int, 
 /// RoPE rotates x in place (tokens x heads x dim, row-major, one position
 /// per token) by rotary position embeddings: each pair p of a head turned
 /// by position · base^(-2p/dim), the pairs as layout says.
-public func RoPE(_ x: gpu.Buffer<float32>, positions: gpu.Buffer<int32>, heads: int, dim: int, base: float32 = 10000,
+public func RoPE(x: gpu.Buffer<float32>, positions: gpu.Buffer<int32>, heads: int, dim: int, base: float32 = 10000,
                  layout: RopeLayout = .interleaved) async throws {
     let total = positions.count * heads * (dim / 2)
     if total == 0 { return }
@@ -478,7 +478,7 @@ public final class RopeTable {
 
 // ---- losses ----
 
-func _crossEntropyRows(_ x: gpu.Span<float32>, _ targets: gpu.Span<int32>, _ loss: gpu.MutableSpan<float32>, _ cols: int) kernel {
+func _crossEntropyRows(x: gpu.Span<float32>, targets: gpu.Span<int32>, loss: gpu.MutableSpan<float32>, cols: int) kernel {
     let row = gpu.GroupIndex.x
     let me = parallel.GroupRank()
     let step = parallel.GroupCount()
@@ -504,7 +504,7 @@ func _crossEntropyRows(_ x: gpu.Span<float32>, _ targets: gpu.Span<int32>, _ los
 
 /// CrossEntropy is each row's loss against its target class: log Σe^x -
 /// x[target], the softmax and the log fused. logits is rows x cols.
-public func CrossEntropy(_ logits: gpu.Buffer<float32>, targets: gpu.Buffer<int32>, rows: int, cols: int) async throws -> gpu.Buffer<float32> {
+public func CrossEntropy(logits: gpu.Buffer<float32>, targets: gpu.Buffer<int32>, rows: int, cols: int) async throws -> gpu.Buffer<float32> {
     let loss = try await logits.Device.CreateBuffer(of: float32.self, count: rows)
     if rows > 0 && cols > 0 {
         try await _crossEntropyRows.Launch(logits, targets, loss, cols, over: rows * 256, workgroup: 256)

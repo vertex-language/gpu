@@ -22,13 +22,13 @@ public enum Reduction {
 }
 
 /// _identity is op's identity for T: the value that changes nothing.
-@inlinable public func _identity<T: dtype.Number>(_ op: int32, _ of: T.Type) -> T {
+@inlinable public func _identity<T: dtype.Number>(op: int32, of: T.Type) -> T {
     if op == 1 { return T.Highest() }
     if op == 2 { return T.Lowest() }
     return 0
 }
 
-@inlinable public func _reduceKernel<T: dtype.Number>(_ x: gpu.Span<T>, _ out: gpu.MutableSpan<T>, _ n: int, _ op: int32) kernel {
+@inlinable public func _reduceKernel<T: dtype.Number>(x: gpu.Span<T>, out: gpu.MutableSpan<T>, n: int, op: int32) kernel {
     let i = gpu.Index.x
     var v: T = 0
     if op == 1 {
@@ -48,7 +48,7 @@ public enum Reduction {
 /// Reduce combines every element of b with op: its sum (wrapping, for an
 /// integer type), least or greatest element. An empty buffer's is op's
 /// identity.
-@inlinable public func Reduce<T: dtype.Number>(_ b: gpu.Buffer<T>, _ op: Reduction) async throws -> T {
+@inlinable public func Reduce<T: dtype.Number>(b: gpu.Buffer<T>, op: Reduction) async throws -> T {
     var n = b.count
     if n == 0 {
         return _identity(op._code, T.self)

@@ -73,7 +73,7 @@ public final class Level {
     }
 
     /// Copies `b` in from the start (rgba8).
-    public func SetBytes(_ b: [uint8]) {
+    public func SetBytes(b: [uint8]) {
         let n = min(b.count, ByteCount)
         if n == 0 { return }
         b.withUnsafeBufferPointer { p in
@@ -227,7 +227,7 @@ public final class Texture {
 }
 
 /// How many levels a full mip chain of this size has.
-public func MipLevels(_ w: int, _ h: int) -> int {
+public func MipLevels(w: int, h: int) -> int {
     var n = 1
     var s = max(w, h)
     while s > 1 {
@@ -280,7 +280,7 @@ public struct Sampler {
 public enum CompareFunc: Equatable {
     case never, less, equal, lessEqual, greater, notEqual, greaterEqual, always
 
-    public func Passes(_ a: float32, _ b: float32) -> bool {
+    public func Passes(a: float32, b: float32) -> bool {
         switch self {
         case .never: return false
         case .less: return a < b

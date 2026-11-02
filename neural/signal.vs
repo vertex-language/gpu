@@ -11,8 +11,8 @@ import (
 
 // ---- normalization across a row, and across channels ----
 
-func _instanceNorm(_ x: gpu.Span<float32>, _ w: gpu.Span<float32>, _ b: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>,
-                   _ cols: int, _ eps: float32, _ affine: bool) kernel {
+func _instanceNorm(x: gpu.Span<float32>, w: gpu.Span<float32>, b: gpu.Span<float32>, y: gpu.MutableSpan<float32>,
+                   cols: int, eps: float32, affine: bool) kernel {
     let row = gpu.GroupIndex.x
     let me = parallel.GroupRank()
     let step = parallel.GroupCount()
@@ -44,7 +44,7 @@ func _instanceNorm(_ x: gpu.Span<float32>, _ w: gpu.Span<float32>, _ b: gpu.Span
 /// InstanceNorm writes each row of x (rows x cols) normalized to zero
 /// mean and unit variance (biased, as InstanceNorm1d's) into y, then
 /// scaled and shifted by that row's weight and bias if given.
-public func InstanceNorm(_ x: gpu.Buffer<float32>, weight: gpu.Buffer<float32>?, bias: gpu.Buffer<float32>?, into y: gpu.Buffer<float32>,
+public func InstanceNorm(x: gpu.Buffer<float32>, weight: gpu.Buffer<float32>?, bias: gpu.Buffer<float32>?, into y: gpu.Buffer<float32>,
                          rows: int, cols: int, eps: float32 = 1e-5) async throws {
     if rows * cols == 0 {
         return
@@ -53,8 +53,8 @@ public func InstanceNorm(_ x: gpu.Buffer<float32>, weight: gpu.Buffer<float32>?,
     try await _instanceNorm.Launch(x, weight ?? x, bias ?? x, y, cols, eps, affine, over: rows * RowGroup, workgroup: RowGroup)
 }
 
-func _channelNorm(_ x: gpu.Span<float32>, _ w: gpu.Span<float32>, _ b: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>,
-                  _ rows: int, _ cols: int, _ eps: float32, _ affine: bool) kernel {
+func _channelNorm(x: gpu.Span<float32>, w: gpu.Span<float32>, b: gpu.Span<float32>, y: gpu.MutableSpan<float32>,
+                  rows: int, cols: int, eps: float32, affine: bool) kernel {
     let t = gpu.Index.x
     if t >= cols {
         return
@@ -86,7 +86,7 @@ func _channelNorm(_ x: gpu.Span<float32>, _ w: gpu.Span<float32>, _ b: gpu.Span<
 /// channels x cols positions) normalized over its rows, then scaled and
 /// shifted by each row's weight and bias if given. It is F.layer_norm
 /// over the channels of an NCL tensor, taken without transposing it.
-public func ChannelNorm(_ x: gpu.Buffer<float32>, weight: gpu.Buffer<float32>?, bias: gpu.Buffer<float32>?, into y: gpu.Buffer<float32>,
+public func ChannelNorm(x: gpu.Buffer<float32>, weight: gpu.Buffer<float32>?, bias: gpu.Buffer<float32>?, into y: gpu.Buffer<float32>,
                         rows: int, cols: int, eps: float32 = 1e-5) async throws {
     if rows * cols == 0 {
         return
@@ -95,7 +95,7 @@ public func ChannelNorm(_ x: gpu.Buffer<float32>, weight: gpu.Buffer<float32>?, 
     try await _channelNorm.Launch(x, weight ?? x, bias ?? x, y, rows, cols, eps, affine, over: cols)
 }
 
-func _modulate(_ x: gpu.Span<float32>, _ gamma: gpu.Span<float32>, _ beta: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>, _ cols: int) kernel {
+func _modulate(x: gpu.Span<float32>, gamma: gpu.Span<float32>, beta: gpu.Span<float32>, y: gpu.MutableSpan<float32>, cols: int) kernel {
     let i = gpu.Index.x
     if i < x.count {
         let r = i / cols
@@ -106,7 +106,7 @@ func _modulate(_ x: gpu.Span<float32>, _ gamma: gpu.Span<float32>, _ beta: gpu.S
 /// Modulate writes (1 + gamma[row]) · x + beta[row] into y, for x of
 /// rows x cols: how AdaIN and adaptive layer norm apply a style's scale
 /// and shift after normalizing.
-public func Modulate(_ x: gpu.Buffer<float32>, gamma: gpu.Buffer<float32>, beta: gpu.Buffer<float32>, into y: gpu.Buffer<float32>, cols: int) async throws {
+public func Modulate(x: gpu.Buffer<float32>, gamma: gpu.Buffer<float32>, beta: gpu.Buffer<float32>, into y: gpu.Buffer<float32>, cols: int) async throws {
     if x.count == 0 {
         return
     }
@@ -115,7 +115,7 @@ public func Modulate(_ x: gpu.Buffer<float32>, gamma: gpu.Buffer<float32>, beta:
 
 // ---- elementwise ----
 
-func _leakyReLU(_ x: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>, _ slope: float32) kernel {
+func _leakyReLU(x: gpu.Span<float32>, y: gpu.MutableSpan<float32>, slope: float32) kernel {
     let i = gpu.Index.x
     if i < x.count {
         let v = x[i]
@@ -124,14 +124,14 @@ func _leakyReLU(_ x: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>, _ slope: 
 }
 
 /// LeakyReLU writes x where it is positive and slope · x elsewhere.
-public func LeakyReLU(_ x: gpu.Buffer<float32>, slope: float32, into y: gpu.Buffer<float32>) async throws {
+public func LeakyReLU(x: gpu.Buffer<float32>, slope: float32, into y: gpu.Buffer<float32>) async throws {
     if x.count == 0 {
         return
     }
     try await _leakyReLU.Launch(x, y, slope, over: x.count)
 }
 
-func _snake(_ x: gpu.Span<float32>, _ alpha: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>, _ cols: int) kernel {
+func _snake(x: gpu.Span<float32>, alpha: gpu.Span<float32>, y: gpu.MutableSpan<float32>, cols: int) kernel {
     let i = gpu.Index.x
     if i < x.count {
         let a = alpha[i / cols]
@@ -143,14 +143,14 @@ func _snake(_ x: gpu.Span<float32>, _ alpha: gpu.Span<float32>, _ y: gpu.Mutable
 
 /// Snake writes x + sin²(α·x)/α into y, α a row's (rows x cols): the
 /// periodic activation of BigVGAN and iSTFTNet's resblocks.
-public func Snake(_ x: gpu.Buffer<float32>, alpha: gpu.Buffer<float32>, into y: gpu.Buffer<float32>, cols: int) async throws {
+public func Snake(x: gpu.Buffer<float32>, alpha: gpu.Buffer<float32>, into y: gpu.Buffer<float32>, cols: int) async throws {
     if x.count == 0 {
         return
     }
     try await _snake.Launch(x, alpha, y, cols, over: x.count)
 }
 
-func _axpby(_ x: gpu.Span<float32>, _ y: gpu.Span<float32>, _ out: gpu.MutableSpan<float32>, _ a: float32, _ b: float32) kernel {
+func _axpby(x: gpu.Span<float32>, y: gpu.Span<float32>, out: gpu.MutableSpan<float32>, a: float32, b: float32) kernel {
     let i = gpu.Index.x
     if i < out.count {
         out[i] = a * x[i] + b * y[i]
@@ -159,7 +159,7 @@ func _axpby(_ x: gpu.Span<float32>, _ y: gpu.Span<float32>, _ out: gpu.MutableSp
 
 /// Axpby writes a·x + b·y into out, element by element: a residual sum,
 /// an average, a difference.
-public func Axpby(_ a: float32, _ x: gpu.Buffer<float32>, _ b: float32, _ y: gpu.Buffer<float32>, into out: gpu.Buffer<float32>) async throws {
+public func Axpby(a: float32, x: gpu.Buffer<float32>, b: float32, y: gpu.Buffer<float32>, into out: gpu.Buffer<float32>) async throws {
     if out.count == 0 {
         return
     }
@@ -168,7 +168,7 @@ public func Axpby(_ a: float32, _ x: gpu.Buffer<float32>, _ b: float32, _ y: gpu
 
 // ---- running sums ----
 
-func _cumSum(_ x: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>, _ rows: int, _ cols: int) kernel {
+func _cumSum(x: gpu.Span<float32>, y: gpu.MutableSpan<float32>, rows: int, cols: int) kernel {
     let r = gpu.Index.x
     if r >= rows {
         return
@@ -190,7 +190,7 @@ func _cumSum(_ x: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>, _ rows: int,
 
 /// CumSum writes each row's running sum into y: torch.cumsum along the
 /// length, a row a work-item.
-public func CumSum(_ x: gpu.Buffer<float32>, into y: gpu.Buffer<float32>, rows: int, cols: int) async throws {
+public func CumSum(x: gpu.Buffer<float32>, into y: gpu.Buffer<float32>, rows: int, cols: int) async throws {
     if rows * cols == 0 {
         return
     }
@@ -199,7 +199,7 @@ public func CumSum(_ x: gpu.Buffer<float32>, into y: gpu.Buffer<float32>, rows: 
 
 // ---- LSTM ----
 
-func _lstmCell(_ gates: gpu.Span<float32>, _ c: gpu.MutableSpan<float32>, _ h: gpu.MutableSpan<float32>, _ hidden: int, _ first: bool) kernel {
+func _lstmCell(gates: gpu.Span<float32>, c: gpu.MutableSpan<float32>, h: gpu.MutableSpan<float32>, hidden: int, first: bool) kernel {
     let j = gpu.Index.x
     if j >= hidden {
         return
@@ -225,13 +225,13 @@ public func LSTMCell(gates: gpu.Buffer<float32>, cell c: gpu.Buffer<float32>, in
 
 /// STFTFrames is how many frames STFT makes of length samples: centered,
 /// 1 + length / hop.
-public func STFTFrames(_ length: int, hop: int) -> int {
+public func STFTFrames(length: int, hop: int) -> int {
     return 1 + length / hop
 }
 
 // twiddles are cos and sin of 2πm/n for m < n, exact at the multiples of
 // a quarter turn, so that a bin the transform makes real comes out real.
-func twiddles(_ n: int) -> [float32] {
+func twiddles(n: int) -> [float32] {
     var out = [float32](repeating: 0, count: 2 * n)
     for m in 0..<n {
         var c = 0.0
@@ -252,7 +252,7 @@ func twiddles(_ n: int) -> [float32] {
 }
 
 /// HannWindow is torch.hann_window(n) (periodic): 0.5 - 0.5·cos(2πk/n).
-public func HannWindow(_ n: int) -> [float32] {
+public func HannWindow(n: int) -> [float32] {
     var w = [float32](repeating: 0, count: n)
     for k in 0..<n {
         w[k] = float32(0.5 - 0.5 * math.Cos(2 * 3.14159265358979323846 * float64(k) / float64(n)))
@@ -260,8 +260,8 @@ public func HannWindow(_ n: int) -> [float32] {
     return w
 }
 
-func _stft(_ x: gpu.Span<float32>, _ win: gpu.Span<float32>, _ tw: gpu.Span<float32>, _ mag: gpu.MutableSpan<float32>, _ phase: gpu.MutableSpan<float32>,
-           _ length: int, _ n: int, _ hop: int, _ frames: int) kernel {
+func _stft(x: gpu.Span<float32>, win: gpu.Span<float32>, tw: gpu.Span<float32>, mag: gpu.MutableSpan<float32>, phase: gpu.MutableSpan<float32>,
+           length: int, n: int, hop: int, frames: int) kernel {
     let i = gpu.Index.x
     let bins = n / 2 + 1
     if i >= bins * frames {
@@ -301,7 +301,7 @@ func _stft(_ x: gpu.Span<float32>, _ win: gpu.Span<float32>, _ tw: gpu.Span<floa
 /// (n/2 + 1) bins x STFTFrames(length, hop) frames, row-major by bin. The
 /// DFT is taken directly: this is for the short windows (n of 16 to 64)
 /// of vocoders like iSTFTNet.
-public func STFT(_ x: gpu.Buffer<float32>, length: int, n: int, hop: int, magnitude mag: gpu.Buffer<float32>, phase: gpu.Buffer<float32>) async throws {
+public func STFT(x: gpu.Buffer<float32>, length: int, n: int, hop: int, magnitude mag: gpu.Buffer<float32>, phase: gpu.Buffer<float32>) async throws {
     let frames = STFTFrames(length, hop: hop)
     precondition(length > n / 2, "neural: a centered STFT reflects n/2 = \(n / 2) samples, and there are \(length)")
     let d = x.Device
@@ -310,8 +310,8 @@ public func STFT(_ x: gpu.Buffer<float32>, length: int, n: int, hop: int, magnit
     try await _stft.Launch(x, win, tw, mag, phase, length, n, hop, frames, over: (n / 2 + 1) * frames)
 }
 
-func _istft(_ mag: gpu.Span<float32>, _ phase: gpu.Span<float32>, _ win: gpu.Span<float32>, _ tw: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>,
-            _ n: int, _ hop: int, _ frames: int, _ length: int) kernel {
+func _istft(mag: gpu.Span<float32>, phase: gpu.Span<float32>, win: gpu.Span<float32>, tw: gpu.Span<float32>, y: gpu.MutableSpan<float32>,
+            n: int, hop: int, frames: int, length: int) kernel {
     let p = gpu.Index.x
     if p >= length {
         return
@@ -354,7 +354,7 @@ func _istft(_ mag: gpu.Span<float32>, _ phase: gpu.Span<float32>, _ win: gpu.Spa
 
 /// ISTFTLength is how many samples ISTFT makes of frames frames:
 /// hop · (frames - 1), the centered padding taken off.
-public func ISTFTLength(_ frames: int, hop: int) -> int {
+public func ISTFTLength(frames: int, hop: int) -> int {
     return hop * (frames - 1)
 }
 

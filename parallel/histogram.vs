@@ -8,7 +8,7 @@ import "gpu"
 /// SharedBins is the most bins Histogram counts in shared storage.
 public let SharedBins = 4096
 
-func _histogramShared(_ x: gpu.Span<uint32>, _ counts: gpu.MutableSpan<uint32>, _ bins: int) kernel {
+func _histogramShared(x: gpu.Span<uint32>, counts: gpu.MutableSpan<uint32>, bins: int) kernel {
     let local = gpu.Shared<uint32>(count: 4096)
     let me = GroupRank()
     let group = GroupCount()
@@ -36,7 +36,7 @@ func _histogramShared(_ x: gpu.Span<uint32>, _ counts: gpu.MutableSpan<uint32>, 
     }
 }
 
-func _histogramGlobal(_ x: gpu.Span<uint32>, _ counts: gpu.MutableSpan<uint32>, _ bins: int) kernel {
+func _histogramGlobal(x: gpu.Span<uint32>, counts: gpu.MutableSpan<uint32>, bins: int) kernel {
     let i = gpu.Index.x
     if i < x.count {
         let v = x[i]
@@ -48,7 +48,7 @@ func _histogramGlobal(_ x: gpu.Span<uint32>, _ counts: gpu.MutableSpan<uint32>, 
 
 /// Histogram counts the values of b in bins 0..<bins: counts[v] is how many
 /// elements equal v. A value of bins or more is not counted.
-public func Histogram(_ b: gpu.Buffer<uint32>, bins: int) async throws -> gpu.Buffer<uint32> {
+public func Histogram(b: gpu.Buffer<uint32>, bins: int) async throws -> gpu.Buffer<uint32> {
     let counts = try await b.Device.CreateBuffer(of: uint32.self, count: bins)
     try await counts.Fill(0)
     if b.count == 0 || bins == 0 {

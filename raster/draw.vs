@@ -68,7 +68,7 @@ public final class Renderer {
 
     /// Clears a target's color, depth and stencil inside `scissor`,
     /// honoring the state's color and stencil write masks.
-    public func Clear(_ t: Target, color: Color?, depth: float32?, stencil: int?, state: State) {
+    public func Clear(t: Target, color: Color?, depth: float32?, stencil: int?, state: State) {
         if let m = metal {
             if m.Clear(t, color: color, depth: depth, stencil: stencil, state: state) { return }
             m.toHost(t, [])
@@ -120,7 +120,7 @@ public final class Renderer {
     // MARK: drawing
 
     /// Draws `d` with `program` into `target`.
-    public func Draw(_ d: Draw, program: Program, state: State, target: Target, textures: [Binding?]) {
+    public func Draw(d: Draw, program: Program, state: State, target: Target, textures: [Binding?]) {
         if d.Count <= 0 || target.Width <= 0 || target.Height <= 0 { return }
         if let m = metal {
             if m.Draw(d, program: program, state: state, target: target, textures: textures) { return }
@@ -174,7 +174,7 @@ public final class Renderer {
         }
     }
 
-    func loadUniforms(_ m: interp.Machine, _ e: interp.Executable, _ values: [uint32]) {
+    func loadUniforms(m: interp.Machine, e: interp.Executable, values: [uint32]) {
         for u in e.Uniforms {
             let n = max(1, e.Module.Slots(u.Type))
             for k in 0..<n where u.Offset + k < values.count {
@@ -185,7 +185,7 @@ public final class Renderer {
 
     // MARK: vertices
 
-    func shadeVertices(_ ids: [int], instance: int, _ d: Draw, _ p: Program, _ vm: interp.Machine) {
+    func shadeVertices(ids: [int], instance: int, d: Draw, p: Program, vm: interp.Machine) {
         let e = p.Vertex
         let L = Lanes
         let V = varyingSlots
@@ -229,7 +229,7 @@ public final class Renderer {
     }
 
     /// Sets one vertex input of one lane from its attribute.
-    func fetch(_ input: interp.Interface, location: int, vertex: int, instance: int, _ d: Draw, _ m: interp.Machine, _ lane: int) {
+    func fetch(input: interp.Interface, location: int, vertex: int, instance: int, d: Draw, m: interp.Machine, lane: int) {
         let t = input.Type
         let columns = t.IsMatrix ? t.Columns : 1
         let rows = t.IsMatrix ? t.Rows : max(1, t.Rows)
@@ -253,7 +253,7 @@ public final class Renderer {
 
     // MARK: primitives
 
-    func assemble(_ s: [int], _ prim: Primitive, _ p: Program, _ fm: interp.Machine, _ st: State, _ t: Target) {
+    func assemble(s: [int], prim: Primitive, p: Program, fm: interp.Machine, st: State, t: Target) {
         // Split at restarts.
         var runs: [[int]] = [[]]
         for v in s {
@@ -303,7 +303,7 @@ public final class Renderer {
     }
 
     /// The window position of a clip-space vertex.
-    func window(_ c: ClipVert, _ st: State) -> WinVert {
+    func window(c: ClipVert, st: State) -> WinVert {
         let iw = c.W != 0 ? 1.0 / float64(c.W) : 0
         let nx = float64(c.X) * iw
         let ny = float64(c.Y) * iw
@@ -318,7 +318,7 @@ public final class Renderer {
     // MARK: clipping
 
     /// A vertex part of the way from a to b, its varyings interpolated.
-    func between(_ a: ClipVert, _ b: ClipVert, _ t: float32) -> ClipVert {
+    func between(a: ClipVert, b: ClipVert, t: float32) -> ClipVert {
         let at = vary.count
         for k in 0..<varyingSlots {
             let x = float32(bitPattern: vary[a.Vary + k])
@@ -330,7 +330,7 @@ public final class Renderer {
     }
 
     /// The polygon left after clipping against near (z ≥ -w) and far (z ≤ w).
-    func clipPolygon(_ poly: [ClipVert]) -> [ClipVert] {
+    func clipPolygon(poly: [ClipVert]) -> [ClipVert] {
         var p = poly
         for plane in 0..<2 {
             if p.isEmpty { return p }
@@ -350,9 +350,9 @@ public final class Renderer {
         return p
     }
 
-    func inside(_ c: ClipVert) -> bool { c.Z + c.W >= 0 && c.W - c.Z >= 0 }
+    func inside(c: ClipVert) -> bool { c.Z + c.W >= 0 && c.W - c.Z >= 0 }
 
-    func triangle(_ i0: int, _ i1: int, _ i2: int, provoking: int, _ p: Program, _ fm: interp.Machine, _ st: State, _ t: Target) {
+    func triangle(i0: int, i1: int, i2: int, provoking: int, p: Program, fm: interp.Machine, st: State, t: Target) {
         let a = clip[i0]
         let b = clip[i1]
         let c = clip[i2]
@@ -369,7 +369,7 @@ public final class Renderer {
         }
     }
 
-    func line(_ i0: int, _ i1: int, _ p: Program, _ fm: interp.Machine, _ st: State, _ t: Target) {
+    func line(i0: int, i1: int, p: Program, fm: interp.Machine, st: State, t: Target) {
         var a = clip[i0]
         var b = clip[i1]
         // Clip the segment against near and far.
@@ -398,7 +398,7 @@ public final class Renderer {
         fill(a0, b1, a1, prov, p, fm, st, t, point: false, cullable: false)
     }
 
-    func point(_ i: int, _ p: Program, _ fm: interp.Machine, _ st: State, _ t: Target) {
+    func point(i: int, p: Program, fm: interp.Machine, st: State, t: Target) {
         let c = clip[i]
         if !inside(c) { return }
         let w = window(c, st)
@@ -415,11 +415,11 @@ public final class Renderer {
     // MARK: rasterizing
 
     /// Covers a triangle's pixels: 2×2 quads into fragment batches.
-    func fill(_ va: WinVert, _ vb: WinVert, _ vc: WinVert, _ prov: int, _ p: Program, _ fm: interp.Machine,
-              _ st: State, _ t: Target, point: bool, cullable: bool = true) {
+    func fill(va: WinVert, vb: WinVert, vc: WinVert, prov: int, p: Program, fm: interp.Machine,
+              st: State, t: Target, point: bool, cullable: bool = true) {
         // Fixed point, 8 bits of subpixel, for exact edge tests.
         let limit: float64 = 1048576
-        func fx(_ v: float64) -> int64 { int64((max(-limit, min(limit, v)) * 256).rounded()) }
+        func fx(v: float64) -> int64 { int64((max(-limit, min(limit, v)) * 256).rounded()) }
         var A = va
         var B = vb
         var C = vc
@@ -481,7 +481,7 @@ public final class Renderer {
         y0 &= ~1
         // Edge functions at pixel centers: E_ab is ≥ 0 inside for a ccw triangle.
         // The fill rule: a center exactly on an edge belongs to one side only.
-        func owns(_ dx: int64, _ dy: int64) -> bool { dy > 0 || (dy == 0 && dx > 0) }
+        func owns(dx: int64, dy: int64) -> bool { dy > 0 || (dy == 0 && dx > 0) }
         let ownBC = owns(cx - bxp, cy - byp)
         let ownCA = owns(ax - cx, ay - cy)
         let ownAB = owns(bxp - ax, byp - ay)

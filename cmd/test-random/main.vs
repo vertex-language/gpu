@@ -9,7 +9,7 @@ import (
 let host = gputest.Devices()[0]
 
 // Random123's known-answer vectors for philox4x32_10.
-func kat(_ what: string, _ key: random.Key, _ c: (uint32, uint32, uint32, uint32), _ want: [uint32]) {
+func kat(what: string, key: random.Key, c: (uint32, uint32, uint32, uint32), want: [uint32]) {
     let b = random.Block(key, c.0, c.1, c.2, c.3)
     gputest.Equal("Philox KAT \(what)", host, [b.0, b.1, b.2, b.3], want)
 }
@@ -20,7 +20,7 @@ kat("pi", random.Key(lo: 0xa4093822, hi: 0x299f31d0), (0x243f6a88, 0x85a308d3, 0
     [0xd16cfe09, 0x94fdcceb, 0x5001e420, 0x24126ea1])
 
 // A kernel of this module calling the device functions.
-func draw(_ out: gpu.MutableSpan<uint32>, _ lo: uint32, _ hi: uint32) kernel {
+func draw(out: gpu.MutableSpan<uint32>, lo: uint32, hi: uint32) kernel {
     let i = gpu.Index.x
     let k = random.Fold(random.Key(lo: lo, hi: hi), 7)
     out[i] = random.Below(k, uint64(i), 1000) + (random.Bernoulli(k, uint64(i) + 1000000, 0.5) ? 1000 : 0)

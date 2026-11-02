@@ -6,7 +6,7 @@ import (
 
 extension Renderer {
     /// Shades the batch's quads and writes what passes the tests.
-    func flush(_ p: Program, _ fm: interp.Machine, _ st: State, _ t: Target, front: bool) {
+    func flush(p: Program, fm: interp.Machine, st: State, t: Target, front: bool) {
         if quads == 0 { return }
         let e = p.Fragment
         let lanes = quads * 4
@@ -151,14 +151,14 @@ extension Renderer {
     }
 }
 
-func clamp01(_ v: float32) -> float32 { v.isNaN ? 0 : min(max(v, 0), 1) }
+func clamp01(v: float32) -> float32 { v.isNaN ? 0 : min(max(v, 0), 1) }
 
 /// A float in 0…1 as an 8-bit unsigned normalized value, rounded to nearest.
-func unorm8(_ v: float32) -> uint8 {
+func unorm8(v: float32) -> uint8 {
     uint8(clamp01(v) * 255 + 0.5)
 }
 
-func stencilUpdate(_ op: StencilOp, _ s: uint8, _ ref: uint32, _ writeMask: uint32) -> uint8 {
+func stencilUpdate(op: StencilOp, s: uint8, ref: uint32, writeMask: uint32) -> uint8 {
     var v: uint32 = uint32(s)
     switch op {
     case .keep: return s
@@ -175,7 +175,7 @@ func stencilUpdate(_ op: StencilOp, _ s: uint8, _ ref: uint32, _ writeMask: uint
 }
 
 /// The factor's four components.
-func factors(_ f: BlendFactor, _ s: Color, _ d: Color, _ k: Color) -> Color {
+func factors(f: BlendFactor, s: Color, d: Color, k: Color) -> Color {
     switch f {
     case .zero: return Color(0, 0, 0, 0)
     case .one: return Color(1, 1, 1, 1)
@@ -197,7 +197,7 @@ func factors(_ f: BlendFactor, _ s: Color, _ d: Color, _ k: Color) -> Color {
     }
 }
 
-func combine(_ eq: BlendEquation, _ s: float32, _ fs: float32, _ d: float32, _ fd: float32) -> float32 {
+func combine(eq: BlendEquation, s: float32, fs: float32, d: float32, fd: float32) -> float32 {
     switch eq {
     case .add: return s * fs + d * fd
     case .subtract: return s * fs - d * fd
@@ -207,7 +207,7 @@ func combine(_ eq: BlendEquation, _ s: float32, _ fs: float32, _ d: float32, _ f
     }
 }
 
-func blend(_ s: Color, _ d: Color, _ st: State) -> Color {
+func blend(s: Color, d: Color, st: State) -> Color {
     let k = st.BlendColor
     let fsRGB = factors(st.SrcRGB, s, d, k)
     let fdRGB = factors(st.DstRGB, s, d, k)
@@ -221,7 +221,7 @@ func blend(_ s: Color, _ d: Color, _ st: State) -> Color {
 
 /// One attribute of one vertex, as four components' bits (missing ones
 /// from (0, 0, 0, 1)); floats unless the shader input is an integer.
-func readAttribute(_ a: Attribute, _ b: [uint8], _ index: int, integerInput: bool) -> [uint32] {
+func readAttribute(a: Attribute, b: [uint8], index: int, integerInput: bool) -> [uint32] {
     let size: int
     switch a.Type {
     case .float32, .int32, .uint32, .fixed: size = 4

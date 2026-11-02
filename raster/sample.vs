@@ -25,13 +25,13 @@ final class Units: interp.Textures {
         bindings = []   // vsc_TODO #35
     }
 
-    func binding(_ unit: int32) -> Binding? {
+    func binding(unit: int32) -> Binding? {
         let u = int(unit)
         if u < 0 || u >= bindings.count { return nil }
         return bindings[u]
     }
 
-    func Sample(_ r: interp.SampleRequest) {
+    func Sample(r: interp.SampleRequest) {
         // Lanes usually all read one unit: resolve it once, then each lane.
         var done: uint64 = 0
         let active = r.Mask
@@ -61,7 +61,7 @@ final class Units: interp.Textures {
     /// The common case, without levels of detail: an RGBA8 2D texture read
     /// at one level, one filter, no compare or swizzle. Returns false when
     /// the texture or sampler isn't that.
-    func sampleFast(_ r: interp.SampleRequest, _ lanes: uint64, _ t: Texture, _ smp: Sampler) -> bool {
+    func sampleFast(r: interp.SampleRequest, lanes: uint64, t: Texture, smp: Sampler) -> bool {
         if t.Format != .rgba8 || t.Cube || smp.Compare != nil || smp.MinFilter != smp.MagFilter { return false }
         let base = max(0, min(smp.BaseLevel, t.Faces[0].count - 1))
         let lastLevel = min(t.Faces[0].count - 1, smp.MaxLevel)
@@ -128,7 +128,7 @@ final class Units: interp.Textures {
     }
 
     /// Any texture: cube faces, levels of detail, compares and swizzles.
-    func sampleGeneral(_ r: interp.SampleRequest, _ lanes: uint64, _ t: Texture, _ smp: Sampler) {
+    func sampleGeneral(r: interp.SampleRequest, lanes: uint64, t: Texture, smp: Sampler) {
         for l in 0..<r.Lanes where lanes & (uint64(1) << uint64(l)) != 0 {
             var s = r.Coords[l * 4]
             var tc = r.Coords[l * 4 + 1]
@@ -209,7 +209,7 @@ final class Units: interp.Textures {
         }
     }
 
-    func Fetch(_ r: interp.SampleRequest) {
+    func Fetch(r: interp.SampleRequest) {
         for l in 0..<r.Lanes where r.Mask & (uint64(1) << uint64(l)) != 0 {
             guard let b = binding(r.Unit[l]), let t = b.Texture else { continue }
             let level = int(r.LodOrBias[l])
@@ -242,7 +242,7 @@ public struct Color {
 
     public init() {}
 
-    public init(_ r: float32, _ g: float32, _ b: float32, _ a: float32) {
+    public init(r: float32, g: float32, b: float32, a: float32) {
         R = r
         G = g
         B = b
@@ -250,16 +250,16 @@ public struct Color {
     }
 
     /// This color moved `t` of the way to `o`.
-    public func Mix(_ o: Color, _ t: float32) -> Color {
+    public func Mix(o: Color, t: float32) -> Color {
         Color(R + (o.R - R) * t, G + (o.G - G) * t, B + (o.B - B) * t, A + (o.A - A) * t)
     }
 
-    public func Scaled(_ k: float32) -> Color { Color(R * k, G * k, B * k, A * k) }
-    public func Plus(_ o: Color) -> Color { Color(R + o.R, G + o.G, B + o.B, A + o.A) }
+    public func Scaled(k: float32) -> Color { Color(R * k, G * k, B * k, A * k) }
+    public func Plus(o: Color) -> Color { Color(R + o.R, G + o.G, B + o.B, A + o.A) }
 }
 
 /// A texel's components.
-func texel(_ t: Texture, _ lv: Level, _ x: int, _ y: int) -> Color {
+func texel(t: Texture, lv: Level, x: int, y: int) -> Color {
     let i = y * lv.Width + x
     switch t.Format {
     case .rgba8:
@@ -273,7 +273,7 @@ func texel(_ t: Texture, _ lv: Level, _ x: int, _ y: int) -> Color {
     }
 }
 
-func wrap(_ i: int, _ size: int, _ w: Wrap) -> int {
+func wrap(i: int, size: int, w: Wrap) -> int {
     switch w {
     case .clampToEdge:
         return max(0, min(size - 1, i))
@@ -289,7 +289,7 @@ func wrap(_ i: int, _ size: int, _ w: Wrap) -> int {
 }
 
 /// A filtered read of one level at normalized (s, t).
-func filtered(_ t: Texture, face: int, level: int, _ s: float32, _ tc: float32, _ f: Filter, _ smp: Sampler) -> Color {
+func filtered(t: Texture, face: int, level: int, s: float32, tc: float32, f: Filter, smp: Sampler) -> Color {
     guard let lv = t.At(face: face, level: level), lv.Width > 0, lv.Height > 0 else { return Color(0, 0, 0, 1) }
     let u = s * float32(lv.Width)
     let v = tc * float32(lv.Height)
@@ -324,7 +324,7 @@ struct CubeHit {
     let Scale: float32
 }
 
-func cubeFace(_ x: float32, _ y: float32, _ z: float32) -> CubeHit {
+func cubeFace(x: float32, y: float32, z: float32) -> CubeHit {
     let ax = abs(x)
     let ay = abs(y)
     let az = abs(z)

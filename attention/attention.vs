@@ -50,9 +50,9 @@ public enum Mask {
     }
 }
 
-func _attend(_ q: gpu.Span<float32>, _ k: gpu.Span<float32>, _ v: gpu.Span<float32>, _ o: gpu.MutableSpan<float32>,
-             _ heads: int, _ kvHeads: int, _ queries: int, _ keys: int, _ capacity: int, _ d: int,
-             _ scale: float32, _ causal: bool, _ window: int) kernel {
+func _attend(q: gpu.Span<float32>, k: gpu.Span<float32>, v: gpu.Span<float32>, o: gpu.MutableSpan<float32>,
+             heads: int, kvHeads: int, queries: int, keys: int, capacity: int, d: int,
+             scale: float32, causal: bool, window: int) kernel {
     let qs = gpu.Shared<float32>(count: 128)
     let ps = gpu.Shared<float32>(count: 128)
     let t = parallel.GroupRank()
@@ -125,8 +125,8 @@ func _attend(_ q: gpu.Span<float32>, _ k: gpu.Span<float32>, _ v: gpu.Span<float
 /// DecodeKeys is the most keys the one-query kernel holds scores for.
 public let DecodeKeys = 4096
 
-func _attendOne(_ q: gpu.Span<float32>, _ k: gpu.Span<float32>, _ v: gpu.Span<float32>, _ o: gpu.MutableSpan<float32>,
-                _ heads: int, _ kvHeads: int, _ keys: int, _ capacity: int, _ d: int, _ scale: float32, _ first: int) kernel {
+func _attendOne(q: gpu.Span<float32>, k: gpu.Span<float32>, v: gpu.Span<float32>, o: gpu.MutableSpan<float32>,
+                heads: int, kvHeads: int, keys: int, capacity: int, d: int, scale: float32, first: int) kernel {
     // One query a head -- decoding a token. A group of 128 scores every
     // visible key at once into shared storage, reduces twice (the most,
     // then the sum of exponentials), and each work-item then gathers one
@@ -182,8 +182,8 @@ func _attendOne(_ q: gpu.Span<float32>, _ k: gpu.Span<float32>, _ v: gpu.Span<fl
     }
 }
 
-func _attendDecode(_ q: gpu.Span<float32>, _ k: gpu.Span<float32>, _ v: gpu.Span<float32>, _ o: gpu.MutableSpan<float32>,
-                   _ group: int, _ keys: int, _ capacity: int, _ d: int, _ scale: float32, _ first: int) kernel {
+func _attendDecode(q: gpu.Span<float32>, k: gpu.Span<float32>, v: gpu.Span<float32>, o: gpu.MutableSpan<float32>,
+                   group: int, keys: int, capacity: int, d: int, scale: float32, first: int) kernel {
     // _attendOne on a GPU with waves of 32: one query a head, a group of
     // eight waves. The grid is (heads a KV head has, KV heads), so a head's
     // KV head is its group's y, not a division. Each work-item scores
@@ -288,9 +288,9 @@ func _attendDecode(_ q: gpu.Span<float32>, _ k: gpu.Span<float32>, _ v: gpu.Span
     }
 }
 
-func _attendTiled(_ q: gpu.Span<float32>, _ k: gpu.Span<float32>, _ v: gpu.Span<float32>, _ o: gpu.MutableSpan<float32>,
-                  _ heads: int, _ kvHeads: int, _ queries: int, _ keys: int, _ capacity: int, _ d: int,
-                  _ scale: float32, _ causal: bool, _ window: int) kernel {
+func _attendTiled(q: gpu.Span<float32>, k: gpu.Span<float32>, v: gpu.Span<float32>, o: gpu.MutableSpan<float32>,
+                  heads: int, kvHeads: int, queries: int, keys: int, capacity: int, d: int,
+                  scale: float32, causal: bool, window: int) kernel {
     // Many queries at once -- a prompt -- a workgroup 16 of one head's,
     // with every tile of 16 keys and values loaded once for all 16:
     // flash attention's tiling, its online softmax kept a row at a time.
@@ -425,7 +425,7 @@ func _attendTiled(_ q: gpu.Span<float32>, _ k: gpu.Span<float32>, _ v: gpu.Span<
 /// Forward is softmax(scale · Q·Kᵀ + mask) · V, written into o. scale is
 /// usually 1/√d. A query that may attend to no key gets zeros.
 public func Forward(q: gpu.Buffer<float32>, k: gpu.Buffer<float32>, v: gpu.Buffer<float32>, into o: gpu.Buffer<float32>,
-                    _ shape: Shape, mask: Mask = .None) async throws {
+                    shape: Shape, mask: Mask = .None) async throws {
     if shape.batch == 0 || shape.heads == 0 || shape.queries == 0 {
         return
     }

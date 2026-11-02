@@ -22,22 +22,22 @@ public protocol Block {
     /// Bytes is how many bytes a block takes.
     static func Bytes() -> int
     /// Decode is element j of the block whose first byte is at.
-    static func Decode(_ b: gpu.Span<uint8>, _ at: int, _ j: int) -> float32
+    static func Decode(b: gpu.Span<uint8>, at: int, j: int) -> float32
     /// Dot is the block whose first byte is at block dotted with the
-    /// Size() floats from x, the scale applied once: the inner step of a
+    /// Size() floats from v, the scale applied once: the inner step of a
     /// quantized Gemv. It reads unchecked; the caller has checked that the
     /// block and the floats are there.
-    static func Dot(_ block: UnsafeMutablePointer<uint8>, _ x: UnsafeMutablePointer<float32>) -> float32
+    static func Dot(block: UnsafeMutablePointer<uint8>, v: UnsafeMutablePointer<float32>) -> float32
 }
 
 /// _scale is the float16 scale at a block's first two bytes.
-@inlinable public func _scale(_ b: gpu.Span<uint8>, _ at: int) -> float32 {
+@inlinable public func _scale(b: gpu.Span<uint8>, at: int) -> float32 {
     return float32(float16(bitPattern: uint16(b[at]) | uint16(b[at + 1]) << 8))
 }
 
 /// _scaleAt is the float16 scale at a block's first two bytes, which lie
 /// 2-byte aligned: every block format's size is even.
-@inlinable public func _scaleAt(_ p: UnsafeMutablePointer<uint8>) -> float32 {
+@inlinable public func _scaleAt(p: UnsafeMutablePointer<uint8>) -> float32 {
     return float32(float16(bitPattern: UnsafePointer<uint16>(UnsafeRawPointer(p)).pointee))
 }
 
@@ -49,12 +49,12 @@ public struct Q4_0: Block {
     @inlinable public static func GGMLType() -> int { return 2 }
     @inlinable public static func Size() -> int { return 32 }
     @inlinable public static func Bytes() -> int { return 18 }
-    @inlinable public static func Decode(_ b: gpu.Span<uint8>, _ at: int, _ j: int) -> float32 {
+    @inlinable public static func Decode(b: gpu.Span<uint8>, at: int, j: int) -> float32 {
         let q = b[at + 2 + (j & 15)]
         let n = j < 16 ? q & 0x0F : q >> 4
         return float32(int32(n) - 8) * _scale(b, at)
     }
-    @inlinable public static func Dot(_ block: UnsafeMutablePointer<uint8>, _ v: UnsafeMutablePointer<float32>) -> float32 {
+    @inlinable public static func Dot(block: UnsafeMutablePointer<uint8>, v: UnsafeMutablePointer<float32>) -> float32 {
         // Blocks are 18 bytes, so their quants start 2-byte aligned: two
         // bytes a load, four elements from each.
         let q = UnsafePointer<uint16>(UnsafeRawPointer(block + 2))
@@ -78,10 +78,10 @@ public struct Q8_0: Block {
     @inlinable public static func GGMLType() -> int { return 8 }
     @inlinable public static func Size() -> int { return 32 }
     @inlinable public static func Bytes() -> int { return 34 }
-    @inlinable public static func Decode(_ b: gpu.Span<uint8>, _ at: int, _ j: int) -> float32 {
+    @inlinable public static func Decode(b: gpu.Span<uint8>, at: int, j: int) -> float32 {
         return float32(int8(bitPattern: b[at + 2 + j])) * _scale(b, at)
     }
-    @inlinable public static func Dot(_ block: UnsafeMutablePointer<uint8>, _ v: UnsafeMutablePointer<float32>) -> float32 {
+    @inlinable public static func Dot(block: UnsafeMutablePointer<uint8>, v: UnsafeMutablePointer<float32>) -> float32 {
         let q = block + 2
         var s: float32 = 0
         var j = 0
@@ -101,11 +101,11 @@ public struct F16: Block {
     @inlinable public static func GGMLType() -> int { return 1 }
     @inlinable public static func Size() -> int { return 16 }
     @inlinable public static func Bytes() -> int { return 32 }
-    @inlinable public static func Decode(_ b: gpu.Span<uint8>, _ at: int, _ j: int) -> float32 {
+    @inlinable public static func Decode(b: gpu.Span<uint8>, at: int, j: int) -> float32 {
         let o = at + 2 * j
         return float32(float16(bitPattern: uint16(b[o]) | uint16(b[o + 1]) << 8))
     }
-    @inlinable public static func Dot(_ block: UnsafeMutablePointer<uint8>, _ v: UnsafeMutablePointer<float32>) -> float32 {
+    @inlinable public static func Dot(block: UnsafeMutablePointer<uint8>, v: UnsafeMutablePointer<float32>) -> float32 {
         let h = UnsafePointer<uint16>(UnsafeRawPointer(block))
         var s: float32 = 0
         var j = 0
@@ -124,10 +124,10 @@ public struct F32: Block {
     @inlinable public static func GGMLType() -> int { return 0 }
     @inlinable public static func Size() -> int { return 1 }
     @inlinable public static func Bytes() -> int { return 4 }
-    @inlinable public static func Decode(_ b: gpu.Span<uint8>, _ at: int, _ j: int) -> float32 {
+    @inlinable public static func Decode(b: gpu.Span<uint8>, at: int, j: int) -> float32 {
         return float32(bitPattern: uint32(b[at]) | uint32(b[at + 1]) << 8 | uint32(b[at + 2]) << 16 | uint32(b[at + 3]) << 24)
     }
-    @inlinable public static func Dot(_ block: UnsafeMutablePointer<uint8>, _ v: UnsafeMutablePointer<float32>) -> float32 {
+    @inlinable public static func Dot(block: UnsafeMutablePointer<uint8>, v: UnsafeMutablePointer<float32>) -> float32 {
         return UnsafePointer<float32>(UnsafeRawPointer(block)).pointee * v[0]
     }
 }
@@ -140,11 +140,11 @@ public struct BF16: Block {
     @inlinable public static func GGMLType() -> int { return 30 }
     @inlinable public static func Size() -> int { return 16 }
     @inlinable public static func Bytes() -> int { return 32 }
-    @inlinable public static func Decode(_ b: gpu.Span<uint8>, _ at: int, _ j: int) -> float32 {
+    @inlinable public static func Decode(b: gpu.Span<uint8>, at: int, j: int) -> float32 {
         let o = at + 2 * j
         return float32(bitPattern: (uint32(b[o]) | uint32(b[o + 1]) << 8) << 16)
     }
-    @inlinable public static func Dot(_ block: UnsafeMutablePointer<uint8>, _ v: UnsafeMutablePointer<float32>) -> float32 {
+    @inlinable public static func Dot(block: UnsafeMutablePointer<uint8>, v: UnsafeMutablePointer<float32>) -> float32 {
         let h = UnsafePointer<uint16>(UnsafeRawPointer(block))
         var s: float32 = 0
         var j = 0
@@ -158,7 +158,7 @@ public struct BF16: Block {
 
 /// _scaleMinK4 is the 6-bit scale and min of sub-block j (0 to 7) of a
 /// k-quant block, packed in its 12 scale bytes (ggml's get_scale_min_k4).
-@inlinable public func _scaleMinK4(_ j: int, _ q: UnsafeMutablePointer<uint8>) -> (int32, int32) {
+@inlinable public func _scaleMinK4(j: int, q: UnsafeMutablePointer<uint8>) -> (int32, int32) {
     if j < 4 {
         return (int32(q[j] & 63), int32(q[j &+ 4] & 63))
     }
@@ -175,17 +175,17 @@ public struct Q4_K: Block {
     @inlinable public static func GGMLType() -> int { return 12 }
     @inlinable public static func Size() -> int { return 256 }
     @inlinable public static func Bytes() -> int { return 144 }
-    @inlinable public static func Decode(_ b: gpu.Span<uint8>, _ at: int, _ e: int) -> float32 {
+    @inlinable public static func Decode(b: gpu.Span<uint8>, at: int, j: int) -> float32 {
         let block = b._base + at
-        let j = e / 64, l = e % 64
-        let (sc, m) = _scaleMinK4(2 * j + (l < 32 ? 0 : 1), block + 4)
-        let q = block[16 + j * 32 + (l % 32)]
+        let sub = j / 64, l = j % 64
+        let (sc, m) = _scaleMinK4(2 * sub + (l < 32 ? 0 : 1), block + 4)
+        let q = block[16 + sub * 32 + (l % 32)]
         let n = l < 32 ? q & 0xF : q >> 4
         // ggml's order: d·sc and dmin·m, then d1·q - m1, each exact but
         // the last, which rounds once.
         return _scaleAt(block) * float32(sc) * float32(n) - _scaleAt(block + 2) * float32(m)
     }
-    @inlinable public static func Dot(_ block: UnsafeMutablePointer<uint8>, _ v: UnsafeMutablePointer<float32>) -> float32 {
+    @inlinable public static func Dot(block: UnsafeMutablePointer<uint8>, v: UnsafeMutablePointer<float32>) -> float32 {
         let d = _scaleAt(block), dmin = _scaleAt(block + 2)
         let scales = block + 4
         var total: float32 = 0
@@ -221,9 +221,9 @@ public struct Q6_K: Block {
     @inlinable public static func GGMLType() -> int { return 14 }
     @inlinable public static func Size() -> int { return 256 }
     @inlinable public static func Bytes() -> int { return 210 }
-    @inlinable public static func Decode(_ b: gpu.Span<uint8>, _ at: int, _ e: int) -> float32 {
+    @inlinable public static func Decode(b: gpu.Span<uint8>, at: int, j: int) -> float32 {
         let block = b._base + at
-        let half = e / 128, r = e % 128, quarter = r / 32, l = r % 32
+        let half = j / 128, r = j % 128, quarter = r / 32, l = r % 32
         let ql = block + half * 64, qh = block + (128 + half * 32)
         let sc = int8(bitPattern: block[192 + half * 8 + l / 16 + quarter * 2])
         let low = quarter % 2 == 0 ? ql[l] : ql[l + 32]
@@ -231,7 +231,7 @@ public struct Q6_K: Block {
         // ggml's order: d·sc, then ·q.
         return _scaleAt(block + 208) * float32(sc) * float32(q - 32)
     }
-    @inlinable public static func Dot(_ block: UnsafeMutablePointer<uint8>, _ v: UnsafeMutablePointer<float32>) -> float32 {
+    @inlinable public static func Dot(block: UnsafeMutablePointer<uint8>, v: UnsafeMutablePointer<float32>) -> float32 {
         let d = _scaleAt(block + 208)
         var total: float32 = 0
         var half = 0
@@ -264,7 +264,7 @@ public struct Q6_K: Block {
     }
 }
 
-@inlinable public func _dequantizeKernel<B: Block>(_ f: B, _ b: gpu.Span<uint8>, _ at: int, _ y: gpu.MutableSpan<float32>, _ n: int) kernel {
+@inlinable public func _dequantizeKernel<B: Block>(f: B, b: gpu.Span<uint8>, at: int, y: gpu.MutableSpan<float32>, n: int) kernel {
     let i = gpu.Index.x
     if i < n {
         y[i] = B.Decode(b, at + i / B.Size() * B.Bytes(), i % B.Size())
@@ -275,15 +275,15 @@ public struct Q6_K: Block {
 /// of b (a block boundary), into y. count is a multiple of the format's
 /// Size(). What an embedding lookup of quantized rows is:
 /// `dtype.Dequantize(w, dtype.Q4_0(), at: row * rowBytes, count: n, into: x)`.
-@inlinable public func Dequantize<B: Block>(_ b: gpu.Buffer<uint8>, _ format: B, at: int = 0, count: int, into y: gpu.Buffer<float32>) async throws {
+@inlinable public func Dequantize<B: Block>(b: gpu.Buffer<uint8>, format: B, at: int = 0, count: int, into y: gpu.Buffer<float32>) async throws {
     if count == 0 {
         return
     }
     try await _dequantizeKernel.Launch(format, b, at, y, count, over: count)
 }
 
-@inlinable public func _dequantizeRowKernel<B: Block>(_ f: B, _ b: gpu.Span<uint8>, _ rows: gpu.Span<int32>, _ index: int, _ rowBytes: int,
-                                                      _ tableRows: int, _ y: gpu.MutableSpan<float32>, _ n: int) kernel {
+@inlinable public func _dequantizeRowKernel<B: Block>(f: B, b: gpu.Span<uint8>, rows: gpu.Span<int32>, index: int, rowBytes: int,
+                                                      tableRows: int, y: gpu.MutableSpan<float32>, n: int) kernel {
     // The row is rows[index], read here: a row past the table is row 0.
     let i = gpu.Index.x
     if i < n {
@@ -298,7 +298,7 @@ public struct Q6_K: Block {
 /// number read on the device: an embedding lookup of a token the device
 /// chose, with nothing read back. A number outside the table's rows is
 /// row 0.
-@inlinable public func DequantizeRow<B: Block>(_ b: gpu.Buffer<uint8>, _ format: B, rows: gpu.Buffer<int32>, index: int, rowBytes: int,
+@inlinable public func DequantizeRow<B: Block>(b: gpu.Buffer<uint8>, format: B, rows: gpu.Buffer<int32>, index: int, rowBytes: int,
                                                count: int, into y: gpu.Buffer<float32>) async throws {
     if count == 0 {
         return
@@ -309,8 +309,8 @@ public struct Q6_K: Block {
     try await _dequantizeRowKernel.Launch(format, b, rows, index, rowBytes, b.count / rowBytes, y, count, over: count)
 }
 
-@inlinable public func _dequantizeRowsKernel<B: Block>(_ f: B, _ b: gpu.Span<uint8>, _ rows: gpu.Span<int32>, _ first: int, _ rowBytes: int,
-                                                       _ tableRows: int, _ y: gpu.MutableSpan<float32>, _ n: int, _ count: int) kernel {
+@inlinable public func _dequantizeRowsKernel<B: Block>(f: B, b: gpu.Span<uint8>, rows: gpu.Span<int32>, first: int, rowBytes: int,
+                                                       tableRows: int, y: gpu.MutableSpan<float32>, n: int, count: int) kernel {
     // Element i of output row t is element i of table row rows[first + t]:
     // a row past the table is row 0.
     let i = gpu.Index.x
@@ -326,7 +326,7 @@ public struct Q6_K: Block {
 /// of rows of rowBytes, n elements each, in the format -- into y, one after
 /// another: the embedding lookup of a batch of tokens, in one launch. A
 /// number outside the table's rows is row 0.
-@inlinable public func DequantizeRows<B: Block>(_ b: gpu.Buffer<uint8>, _ format: B, rows: gpu.Buffer<int32>, first: int = 0, count: int,
+@inlinable public func DequantizeRows<B: Block>(b: gpu.Buffer<uint8>, format: B, rows: gpu.Buffer<int32>, first: int = 0, count: int,
                                                 rowBytes: int, n: int, into y: gpu.Buffer<float32>) async throws {
     if count == 0 || n == 0 {
         return

@@ -13,13 +13,13 @@ var failures = 0
 
 var prefix = ""
 
-func check(_ ok: bool, _ what: string) {
+func check(ok: bool, what: string) {
     let what = prefix + what
     print(ok ? "ok    \(what)" : "FAIL  \(what)")
     if !ok { failures += 1 }
 }
 
-func program(_ vs: string, _ fs: string) -> raster.Program? {
+func program(vs: string, fs: string) -> raster.Program? {
     let v = glsl.Compile(vs, stage: .vertex)
     let f = glsl.Compile(fs, stage: .fragment)
     guard let vm = v.Module, let fm = f.Module else {
@@ -34,7 +34,7 @@ func program(_ vs: string, _ fs: string) -> raster.Program? {
     }
 }
 
-func floats(_ xs: [float32]) -> raster.Buffer {
+func floats(xs: [float32]) -> raster.Buffer {
     var b: [uint8] = []
     for x in xs {
         let u = x.bitPattern
@@ -43,7 +43,7 @@ func floats(_ xs: [float32]) -> raster.Buffer {
     return raster.Buffer(b)
 }
 
-func positions(_ xs: [float32]) -> raster.Attribute {
+func positions(xs: [float32]) -> raster.Attribute {
     var a = raster.Attribute()
     a.Enabled = true
     a.Buffer = floats(xs)
@@ -51,12 +51,12 @@ func positions(_ xs: [float32]) -> raster.Attribute {
     return a
 }
 
-func setUniform(_ p: raster.Program, _ name: string, _ v: [float32]) {
+func setUniform(p: raster.Program, name: string, v: [float32]) {
     if let u = p.Vertex.FindUniform(name) { for (k, x) in v.enumerated() { p.VertexUniforms[u.Offset + k] = x.bitPattern } }
     if let u = p.Fragment.FindUniform(name) { for (k, x) in v.enumerated() { p.FragmentUniforms[u.Offset + k] = x.bitPattern } }
 }
 
-func pixel(_ t: raster.Texture, _ x: int, _ y: int) -> [uint8] {
+func pixel(t: raster.Texture, x: int, y: int) -> [uint8] {
     let l = t.Read(level: 0)!
     let i = (y * l.Width + x) * 4
     return [l.Bytes[i], l.Bytes[i + 1], l.Bytes[i + 2], l.Bytes[i + 3]]

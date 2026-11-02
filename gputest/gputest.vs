@@ -14,7 +14,7 @@ var _failures = 0
 
 /// _record counts one check, and prints why it failed if it did: why is
 /// empty for a pass.
-public func _record(_ what: string, _ d: gpu.Device, _ why: string) {
+public func _record(what: string, d: gpu.Device, why: string) {
     _checks += 1
     if why != "" {
         _failures += 1
@@ -35,12 +35,12 @@ public func Devices() -> [gpu.Device] {
 }
 
 /// Equal checks that got is want, element for element.
-public func Equal<T: Equatable>(_ what: string, _ d: gpu.Device, _ got: [T], _ want: [T]) {
+public func Equal<T: Equatable>(what: string, d: gpu.Device, got: [T], want: [T]) {
     _record(what, d, _mismatch(got, want))
 }
 
 /// _mismatch says how got differs from want, or is empty if it does not.
-func _mismatch<T: Equatable>(_ got: [T], _ want: [T]) -> string {
+func _mismatch<T: Equatable>(got: [T], want: [T]) -> string {
     if got.count != want.count {
         return "got \(got.count) elements, want \(want.count)"
     }
@@ -56,7 +56,7 @@ func _mismatch<T: Equatable>(_ got: [T], _ want: [T]) -> string {
 
 /// Close checks that each element of got is within ulps units in the last
 /// place of want: for sums whose order differs from the reference's.
-public func Close(_ what: string, _ d: gpu.Device, _ got: [float32], _ want: [float32], ulps: int) {
+public func Close(what: string, d: gpu.Device, got: [float32], want: [float32], ulps: int) {
     if got.count != want.count {
         _record(what, d, "got \(got.count) elements, want \(want.count)")
         return
@@ -76,7 +76,7 @@ public func Close(_ what: string, _ d: gpu.Device, _ got: [float32], _ want: [fl
 /// for a result whose error is bounded by what it was computed from rather
 /// than by its own size, as a dot product's is by k·ε·Σ|a·b| however much
 /// its terms cancel.
-public func Near(_ what: string, _ d: gpu.Device, _ got: [float32], _ want: [float64], bound: [float64]) {
+public func Near(what: string, d: gpu.Device, got: [float32], want: [float64], bound: [float64]) {
     if got.count != want.count || bound.count != want.count {
         _record(what, d, "got \(got.count) elements, want \(want.count)")
         return
@@ -95,7 +95,7 @@ public func Near(_ what: string, _ d: gpu.Device, _ got: [float32], _ want: [flo
 
 /// _ulpDistance is how many representable float32s apart a and b are; NaN
 /// is equal only to NaN.
-func _ulpDistance(_ a: float32, _ b: float32) -> int {
+func _ulpDistance(a: float32, b: float32) -> int {
     if a.isNaN || b.isNaN {
         return a.isNaN && b.isNaN ? 0 : int.max
     }
@@ -105,7 +105,7 @@ func _ulpDistance(_ a: float32, _ b: float32) -> int {
 }
 
 /// _ordered maps a float32's bits onto the integers in the float order.
-func _ordered(_ f: float32) -> int {
+func _ordered(f: float32) -> int {
     let b = int(f.bitPattern)
     return b >= 0x80000000 ? 0x80000000 - b : b
 }

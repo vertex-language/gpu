@@ -8,7 +8,7 @@ import (
     "gpu/dtype"
 )
 
-@inlinable public func _scanBlocks<T: dtype.Number>(_ x: gpu.MutableSpan<T>, _ sums: gpu.MutableSpan<T>, _ n: int, _ exclusive: bool) kernel {
+@inlinable public func _scanBlocks<T: dtype.Number>(x: gpu.MutableSpan<T>, sums: gpu.MutableSpan<T>, n: int, exclusive: bool) kernel {
     let i = gpu.Index.x
     var v: T = 0
     if i < n {
@@ -27,7 +27,7 @@ import (
     }
 }
 
-@inlinable public func _addOffsets<T: dtype.Number>(_ x: gpu.MutableSpan<T>, _ offsets: gpu.Span<T>, _ n: int) kernel {
+@inlinable public func _addOffsets<T: dtype.Number>(x: gpu.MutableSpan<T>, offsets: gpu.Span<T>, n: int) kernel {
     let i = gpu.Index.x
     if i < n {
         x[i] = T.Plus(offsets[gpu.GroupIndex.x], x[i])
@@ -37,7 +37,7 @@ import (
 /// Scan replaces each element of b with the sum of the elements up to
 /// it: including itself (inclusive, the default), or before it
 /// (exclusive, whose first element is zero). An integer sum wraps.
-@inlinable public func Scan<T: dtype.Number>(_ b: gpu.Buffer<T>, exclusive: bool = false) async throws {
+@inlinable public func Scan<T: dtype.Number>(b: gpu.Buffer<T>, exclusive: bool = false) async throws {
     let n = b.count
     if n == 0 {
         return

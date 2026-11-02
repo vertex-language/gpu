@@ -54,9 +54,9 @@ public struct Conv1dShape {
     }
 }
 
-func _conv1d(_ x: gpu.Span<float32>, _ w: gpu.Span<float32>, _ b: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>,
-             _ cin: int, _ tin: int, _ cout: int, _ tout: int, _ k: int,
-             _ stride: int, _ pad: int, _ dilation: int, _ groups: int, _ bias: bool) kernel {
+func _conv1d(x: gpu.Span<float32>, w: gpu.Span<float32>, b: gpu.Span<float32>, y: gpu.MutableSpan<float32>,
+             cin: int, tin: int, cout: int, tout: int, k: int,
+             stride: int, pad: int, dilation: int, groups: int, bias: bool) kernel {
     let i = gpu.Index.x
     if i >= cout * tout {
         return
@@ -85,14 +85,14 @@ func _conv1d(_ x: gpu.Span<float32>, _ w: gpu.Span<float32>, _ b: gpu.Span<float
 }
 
 /// Conv1dLength is the output length of a Conv1d over tin samples.
-public func Conv1dLength(_ tin: int, kernel k: int, stride: int = 1, padding: int = 0, dilation: int = 1) -> int {
+public func Conv1dLength(tin: int, kernel k: int, stride: int = 1, padding: int = 0, dilation: int = 1) -> int {
     return (tin + 2 * padding - dilation * (k - 1) - 1) / stride + 1
 }
 
 /// Conv1d writes torch.nn.functional.conv1d(x, w, b, stride, padding,
 /// dilation, groups) into y: x is [In, Length], w [Out, In/Groups,
 /// Kernel], b [Out] or nil, y [Out, s.OutLength].
-public func Conv1d(_ x: gpu.Buffer<float32>, weight w: gpu.Buffer<float32>, bias b: gpu.Buffer<float32>?, into y: gpu.Buffer<float32>, _ s: Conv1dShape) async throws {
+public func Conv1d(x: gpu.Buffer<float32>, weight w: gpu.Buffer<float32>, bias b: gpu.Buffer<float32>?, into y: gpu.Buffer<float32>, s: Conv1dShape) async throws {
     let tout = s.OutLength
     if s.Out * tout == 0 {
         return
@@ -106,9 +106,9 @@ public func Conv1d(_ x: gpu.Buffer<float32>, weight w: gpu.Buffer<float32>, bias
 
 // Each output element gathers the inputs that scatter to it: input
 // position q reaches output q·stride - pad + j·dilation through tap j.
-func _convTranspose1d(_ x: gpu.Span<float32>, _ w: gpu.Span<float32>, _ b: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>,
-                      _ cin: int, _ tin: int, _ cout: int, _ tout: int, _ k: int,
-                      _ stride: int, _ pad: int, _ dilation: int, _ groups: int, _ bias: bool) kernel {
+func _convTranspose1d(x: gpu.Span<float32>, w: gpu.Span<float32>, b: gpu.Span<float32>, y: gpu.MutableSpan<float32>,
+                      cin: int, tin: int, cout: int, tout: int, k: int,
+                      stride: int, pad: int, dilation: int, groups: int, bias: bool) kernel {
     let i = gpu.Index.x
     if i >= cout * tout {
         return
@@ -142,14 +142,14 @@ func _convTranspose1d(_ x: gpu.Span<float32>, _ w: gpu.Span<float32>, _ b: gpu.S
 
 /// ConvTranspose1dLength is the output length of a ConvTranspose1d over
 /// tin samples.
-public func ConvTranspose1dLength(_ tin: int, kernel k: int, stride: int = 1, padding: int = 0, outputPadding: int = 0, dilation: int = 1) -> int {
+public func ConvTranspose1dLength(tin: int, kernel k: int, stride: int = 1, padding: int = 0, outputPadding: int = 0, dilation: int = 1) -> int {
     return (tin - 1) * stride - 2 * padding + dilation * (k - 1) + outputPadding + 1
 }
 
 /// ConvTranspose1d writes torch.nn.functional.conv_transpose1d(x, w, b,
 /// stride, padding, output_padding, groups, dilation) into y: x is
 /// [In, Length], w [In, Out/Groups, Kernel], y [Out, s.TransposedOutLength].
-public func ConvTranspose1d(_ x: gpu.Buffer<float32>, weight w: gpu.Buffer<float32>, bias b: gpu.Buffer<float32>?, into y: gpu.Buffer<float32>, _ s: Conv1dShape) async throws {
+public func ConvTranspose1d(x: gpu.Buffer<float32>, weight w: gpu.Buffer<float32>, bias b: gpu.Buffer<float32>?, into y: gpu.Buffer<float32>, s: Conv1dShape) async throws {
     let tout = s.TransposedOutLength
     if s.Out * tout == 0 {
         return
@@ -161,7 +161,7 @@ public func ConvTranspose1d(_ x: gpu.Buffer<float32>, weight w: gpu.Buffer<float
 
 // ---- weight normalization ----
 
-func _weightNorm(_ g: gpu.Span<float32>, _ v: gpu.Span<float32>, _ w: gpu.MutableSpan<float32>, _ cols: int) kernel {
+func _weightNorm(g: gpu.Span<float32>, v: gpu.Span<float32>, w: gpu.MutableSpan<float32>, cols: int) kernel {
     let row = gpu.GroupIndex.x
     let me = parallel.GroupRank()
     let step = parallel.GroupCount()
@@ -194,7 +194,7 @@ public func WeightNorm(g: gpu.Buffer<float32>, v: gpu.Buffer<float32>, into w: g
 
 // ---- padding ----
 
-func _pad(_ x: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>, _ rows: int, _ cols: int, _ left: int, _ outCols: int, _ reflect: bool) kernel {
+func _pad(x: gpu.Span<float32>, y: gpu.MutableSpan<float32>, rows: int, cols: int, left: int, outCols: int, reflect: bool) kernel {
     let i = gpu.Index.x
     if i >= rows * outCols {
         return
@@ -216,7 +216,7 @@ func _pad(_ x: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>, _ rows: int, _ 
 /// y (rows x (left + cols + right)): with zeros, or reflected about the
 /// row's first and last samples as ReflectionPad1d does (left and right
 /// less than cols).
-public func Pad(_ x: gpu.Buffer<float32>, into y: gpu.Buffer<float32>, rows: int, cols: int, left: int, right: int, reflect: bool = false) async throws {
+public func Pad(x: gpu.Buffer<float32>, into y: gpu.Buffer<float32>, rows: int, cols: int, left: int, right: int, reflect: bool = false) async throws {
     let out = left + cols + right
     if rows * out == 0 {
         return
@@ -237,7 +237,7 @@ public enum Resize: Equatable {
     public var _code: int32 { return self == .nearest ? 0 : 1 }
 }
 
-func _upsample(_ x: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>, _ rows: int, _ tin: int, _ tout: int, _ scale: float32, _ mode: int32) kernel {
+func _upsample(x: gpu.Span<float32>, y: gpu.MutableSpan<float32>, rows: int, tin: int, tout: int, scale: float32, mode: int32) kernel {
     let i = gpu.Index.x
     if i >= rows * tout {
         return
@@ -281,7 +281,7 @@ func _upsample(_ x: gpu.Span<float32>, _ y: gpu.MutableSpan<float32>, _ rows: in
 
 /// UpsampleLength is the length interpolate(scale_factor: factor) makes
 /// of tin samples: floor(tin · factor), in double as PyTorch takes it.
-public func UpsampleLength(_ tin: int, factor: float64) -> int {
+public func UpsampleLength(tin: int, factor: float64) -> int {
     return int((float64(tin) * factor).rounded(.down))
 }
 
@@ -290,7 +290,7 @@ public func UpsampleLength(_ tin: int, factor: float64) -> int {
 /// scale_factor: factor, mode) does -- factor below 1 shrinks. The output
 /// is UpsampleLength(tin, factor) long, and positions map through
 /// 1/factor, not tin/tout, as PyTorch's do when given a scale factor.
-public func Upsample(_ x: gpu.Buffer<float32>, into y: gpu.Buffer<float32>, rows: int, length tin: int, factor: float64, mode: Resize) async throws {
+public func Upsample(x: gpu.Buffer<float32>, into y: gpu.Buffer<float32>, rows: int, length tin: int, factor: float64, mode: Resize) async throws {
     let tout = UpsampleLength(tin, factor: factor)
     if rows * tout == 0 {
         return

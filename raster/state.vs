@@ -161,7 +161,7 @@ public final class Buffer {
     var maxKey: [int] = []
     var maxIndex = 0
 
-    public init(_ bytes: [uint8] = []) {
+    public init(bytes: [uint8] = []) {
         Bytes = bytes
     }
 
@@ -227,7 +227,7 @@ public struct Draw {
 public struct LinkError: Error {
     public let Message: string
 
-    public init(_ message: string) {
+    public init(message: string) {
         Message = message
     }
 }

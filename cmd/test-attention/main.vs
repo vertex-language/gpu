@@ -6,11 +6,11 @@ import (
     "gpu/gputest"
 )
 
-@_silgen_name("exp") func cExp(_ x: float64) -> float64
+@_silgen_name("exp") func cExp(x: float64) -> float64
 
 var rng = gputest.Random(seed: 5)
 
-func host(_ q: [float32], _ k: [float32], _ v: [float32], _ s: attention.Shape, _ causal: bool, _ window: int) -> [float64] {
+func host(q: [float32], k: [float32], v: [float32], s: attention.Shape, causal: bool, window: int) -> [float64] {
     var o = [float64](repeating: 0, count: s.batch * s.heads * s.queries * s.headDim)
     let d = s.headDim
     let scale = s.scale != 0 ? float64(s.scale) : 1 / float64(d).squareRoot()

@@ -28,7 +28,7 @@ public let MaxGroup = 1024
 }
 
 /// _pow2 is the least power of two no smaller than n.
-@inlinable public func _pow2(_ n: int) -> int {
+@inlinable public func _pow2(n: int) -> int {
     var w = 1
     while w < n {
         w = w &<< 1
@@ -38,7 +38,7 @@ public let MaxGroup = 1024
 
 /// _groupReduce combines x over the workgroup: op 0 sums (Plus), 1 takes
 /// the least, 2 the greatest.
-@inlinable public func _groupReduce<T: dtype.Number>(_ x: T, _ op: int32) -> T {
+@inlinable public func _groupReduce<T: dtype.Number>(x: T, op: int32) -> T {
     let s = gpu.Shared<T>(count: 1024)
     let me = GroupRank()
     let n = GroupCount()
@@ -69,18 +69,18 @@ public let MaxGroup = 1024
 
 /// GroupSum is the sum of x over the workgroup, added in a fixed tree
 /// order; an integer sum wraps.
-@inlinable public func GroupSum<T: dtype.Number>(_ x: T) -> T { return _groupReduce(x, 0) }
+@inlinable public func GroupSum<T: dtype.Number>(x: T) -> T { return _groupReduce(x, 0) }
 
 /// GroupMin is the least x in the workgroup.
-@inlinable public func GroupMin<T: dtype.Number>(_ x: T) -> T { return _groupReduce(x, 1) }
+@inlinable public func GroupMin<T: dtype.Number>(x: T) -> T { return _groupReduce(x, 1) }
 
 /// GroupMax is the greatest x in the workgroup.
-@inlinable public func GroupMax<T: dtype.Number>(_ x: T) -> T { return _groupReduce(x, 2) }
+@inlinable public func GroupMax<T: dtype.Number>(x: T) -> T { return _groupReduce(x, 2) }
 
 /// _groupScan is the inclusive and exclusive prefix sums of x at this
 /// work-item, and the group's total, which is the last inclusive sum
 /// exactly: the order a sum is taken in is the same for all three.
-@inlinable public func _groupScan<T: dtype.Number>(_ x: T) -> (inclusive: T, exclusive: T, total: T) {
+@inlinable public func _groupScan<T: dtype.Number>(x: T) -> (inclusive: T, exclusive: T, total: T) {
     let s = gpu.Shared<T>(count: 1024)
     let me = GroupRank()
     let n = GroupCount()
@@ -109,13 +109,13 @@ public let MaxGroup = 1024
 
 /// GroupScan is the inclusive prefix sum of x up to and including this
 /// work-item, in GroupRank order.
-@inlinable public func GroupScan<T: dtype.Number>(_ x: T) -> T {
+@inlinable public func GroupScan<T: dtype.Number>(x: T) -> T {
     return _groupScan(x).inclusive
 }
 
 /// GroupExclusiveScan is the prefix sum of x before this work-item, and
 /// the whole group's total.
-@inlinable public func GroupExclusiveScan<T: dtype.Number>(_ x: T) -> (prefix: T, total: T) {
+@inlinable public func GroupExclusiveScan<T: dtype.Number>(x: T) -> (prefix: T, total: T) {
     let r = _groupScan(x)
     return (prefix: r.exclusive, total: r.total)
 }

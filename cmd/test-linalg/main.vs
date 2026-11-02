@@ -9,13 +9,13 @@ import (
 
 var rng = gputest.Random(seed: 3)
 
-func hostMatmul(_ a: [float64], _ b: [float64], _ m: int, _ n: int, _ k: int, _ ta: bool, _ tb: bool) -> [float64] {
+func hostMatmul(a: [float64], b: [float64], m: int, n: int, k: int, ta: bool, tb: bool) -> [float64] {
     return hostProducts(a, b, m, n, k, ta, tb, false)
 }
 
 // hostProducts is A·B, or with abs, Σ|a·b| for each element: what bounds
 // a float32 dot product's error.
-func hostProducts(_ a: [float64], _ b: [float64], _ m: int, _ n: int, _ k: int, _ ta: bool, _ tb: bool, _ abs: bool) -> [float64] {
+func hostProducts(a: [float64], b: [float64], m: int, n: int, k: int, ta: bool, tb: bool, abs: bool) -> [float64] {
     var c = [float64](repeating: 0, count: m * n)
     for i in 0..<m {
         for j in 0..<n {
@@ -112,7 +112,7 @@ for (m, k) in [(1, 1), (7, 3), (64, 256), (300, 1000), (5, 4097)] {
 // Halves in, halves out, the sum taken in float32: within the float32
 // bound of a sum of k products, plus one rounding to the half at the end
 // (eps, relative) and its smallest subnormal step (tiny).
-func halfMatmul<T: dtype.Number>(_ name: string, _ t: T.Type, eps: float64, tiny: float64) async throws {
+func halfMatmul<T: dtype.Number>(name: string, t: T.Type, eps: float64, tiny: float64) async throws {
     for (m, n, k) in shapes {
         for (ta, tb) in [(false, false), (true, false), (false, true)] {
             var ah: [T] = [], bh: [T] = []
@@ -154,7 +154,7 @@ try await halfMatmul("bf16", bfloat16.self, eps: 3.90625e-03, tiny: 1e-38)
 
 // ggml's dequantize_row_q4_0 and _q8_0, on the host: element j of the
 // block at byte at.
-func hostDecode(_ q8: bool, _ b: [uint8], _ at: int, _ j: int) -> float32 {
+func hostDecode(q8: bool, b: [uint8], at: int, j: int) -> float32 {
     let d = float32(float16(bitPattern: uint16(b[at]) | uint16(b[at + 1]) << 8))
     if q8 {
         return float32(int8(bitPattern: b[at + 2 + j])) * d
@@ -164,7 +164,7 @@ func hostDecode(_ q8: bool, _ b: [uint8], _ at: int, _ j: int) -> float32 {
 }
 
 // Random blocks: a scale of a size weights have, and random quants.
-func blocks(_ q8: bool, _ rows: int, _ k: int) -> [uint8] {
+func blocks(q8: bool, rows: int, k: int) -> [uint8] {
     let size = q8 ? 34 : 18
     var out: [uint8] = []
     for _ in 0..<(rows * k / 32) {
@@ -176,7 +176,7 @@ func blocks(_ q8: bool, _ rows: int, _ k: int) -> [uint8] {
     return out
 }
 
-func quantized<B: dtype.Block>(_ name: string, _ format: B, _ q8: bool) async throws {
+func quantized<B: dtype.Block>(name: string, format: B, q8: bool) async throws {
     for (m, k) in [(1, 32), (7, 64), (288, 288), (768, 288), (288, 768), (100, 4096)] {
         let w = blocks(q8, m, k)
         var x: [float32] = []
@@ -260,7 +260,7 @@ for (k, rows) in [(288, [288, 96, 96]), (4096, [64, 32, 32]), (64, [5, 1])] {
 // Random blocks with small finite scales where each format keeps them;
 // Gemv against the device's own decode (checked bit for bit against
 // ggml's in model's test-quant) dotted with x in float64.
-func kblocks(_ rows: int, _ k: int, _ bytes: int, _ scaleAt: [int]) -> [uint8] {
+func kblocks(rows: int, k: int, bytes: int, scaleAt: [int]) -> [uint8] {
     var out: [uint8] = []
     for _ in 0..<(rows * k / 256) {
         var b: [uint8] = []
@@ -275,7 +275,7 @@ func kblocks(_ rows: int, _ k: int, _ bytes: int, _ scaleAt: [int]) -> [uint8] {
     return out
 }
 
-func kquant<B: dtype.Block>(_ name: string, _ format: B, _ scaleAt: [int]) async throws {
+func kquant<B: dtype.Block>(name: string, format: B, scaleAt: [int]) async throws {
     for (m, k) in [(1, 256), (37, 768), (768, 2048), (100, 4096)] {
         let w = kblocks(m, k, B.Bytes(), scaleAt)
         let x = (0..<k).map { _ in rng.Float32() * 2 - 1 }
@@ -308,7 +308,7 @@ try await kquant("q6_K", dtype.Q6_K(), [208])
 
 // Random halves in [-1, 1]; decode against the host's own widening, Gemv
 // against float64.
-func halves<B: dtype.Block>(_ name: string, _ format: B, _ bf16: bool) async throws {
+func halves<B: dtype.Block>(name: string, format: B, bf16: bool) async throws {
     for (m, k) in [(1, 16), (5, 48), (288, 288), (100, 4096)] {
         var w: [uint8] = []
         var dense: [float32] = []
@@ -359,7 +359,7 @@ try await quantized("q8_0", dtype.Q8_0(), true)
 // Y = X·Wᵀ against the device's own decode of W dotted with each token in
 // float64: odd shapes, every tile edge, stacked parts written side by
 // side, and accumulation into a residual.
-func gemm<B: dtype.Block>(_ name: string, _ format: B, _ make: (int, int) -> [uint8]) async throws {
+func gemm<B: dtype.Block>(name: string, format: B, make: (int, int) -> [uint8]) async throws {
     for (m, n, k, parts) in [(5, 3, 256, 1), (96, 33, 512, 3), (300, 70, 256, 2), (64, 1, 768, 1)] {
         let rows = parts == 1 ? [m] : parts == 2 ? [m - m / 3, m / 3] : [m / 2, m / 4, m - m / 2 - m / 4]
         var ws: [[uint8]] = []
@@ -396,7 +396,7 @@ func gemm<B: dtype.Block>(_ name: string, _ format: B, _ make: (int, int) -> [ui
     }
 }
 
-func halfBlocks(_ bf16: bool) -> (int, int) -> [uint8] {
+func halfBlocks(bf16: bool) -> (int, int) -> [uint8] {
     return { rows, k in
         var w: [uint8] = []
         for _ in 0..<(rows * k) {

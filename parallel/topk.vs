@@ -3,7 +3,7 @@
 // to the earlier position, as a stable sort leaves them.
 import "gpu"
 
-func _iota(_ out: gpu.MutableSpan<uint32>, _ start: uint32) kernel {
+func _iota(out: gpu.MutableSpan<uint32>, start: uint32) kernel {
     let i = gpu.Index.x
     if i < out.count {
         out[i] = start &+ uint32(i)
@@ -11,7 +11,7 @@ func _iota(_ out: gpu.MutableSpan<uint32>, _ start: uint32) kernel {
 }
 
 /// Iota is count consecutive integers from start, on d.
-public func Iota(_ d: gpu.Device, count: int, from start: uint32 = 0) async throws -> gpu.Buffer<uint32> {
+public func Iota(d: gpu.Device, count: int, from start: uint32 = 0) async throws -> gpu.Buffer<uint32> {
     let out = try await d.CreateBuffer(of: uint32.self, count: count)
     if count > 0 {
         try await _iota.Launch(out, start, over: count)
@@ -20,7 +20,7 @@ public func Iota(_ d: gpu.Device, count: int, from start: uint32 = 0) async thro
 }
 
 /// _topIndices is the positions of the k greatest of b.
-public func _topIndices(_ bits: gpu.Buffer<uint32>, _ k: int) async throws -> gpu.Buffer<uint32> {
+public func _topIndices(bits: gpu.Buffer<uint32>, k: int) async throws -> gpu.Buffer<uint32> {
     let order = try await Iota(bits.Device, count: bits.count)
     try await _radixSort(bits, order, true)
     let top = try await bits.Device.CreateBuffer(of: uint32.self, count: k)
@@ -34,7 +34,7 @@ public func _topIndices(_ bits: gpu.Buffer<uint32>, _ k: int) async throws -> gp
 /// in b. Equal elements come in the order they were in b; for floats, NaNs
 /// rank above every number, as in the total order Sort uses. k is at most
 /// b.count.
-@inlinable public func TopK<T: dtype.Number>(_ b: gpu.Buffer<T>, k: int) async throws -> (values: gpu.Buffer<T>, indices: gpu.Buffer<uint32>) {
+@inlinable public func TopK<T: dtype.Number>(b: gpu.Buffer<T>, k: int) async throws -> (values: gpu.Buffer<T>, indices: gpu.Buffer<uint32>) {
     let bits = try await b.Device.CreateBuffer(of: uint32.self, count: b.count)
     if b.count > 0 {
         try await _toOrderKeys.Launch(b, bits, true, over: b.count)
